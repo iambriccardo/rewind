@@ -177,7 +177,7 @@ Validation limits:
 | `context.time_zone` | Optional IANA timezone, for example `Europe/Vienna`. |
 | `context.utc_offset_minutes` | Optional integer offset from UTC, `-840` to `840`. |
 
-The backend uses `buffers.rewind.duration_ms` to set the maximum `rewind_duration_seconds` that Gemini Live may request. Create/save is optimized for the current or just-finished moment, not arbitrary historical capture. If the user says an explicit rolling-buffer duration such as `save the last 20 seconds` or `remind me about the last minute`, the model should use that duration, clamped to the available buffer. Otherwise it chooses the smallest useful duration from the current context. The backend anchors that duration to the UTC time when the Live tool call is received and sends an explicit capture window in `rewind.save_request`.
+The backend uses `buffers.rewind.duration_ms` to set the maximum `rewind_duration_seconds` that Gemini Live may request. Create/save is optimized for the current or just-finished moment, not arbitrary historical capture. If the user says an explicit rolling-buffer duration such as `save the last 20 seconds` or `remind me about the last minute`, the model should use that duration, clamped to the available buffer. Otherwise it chooses the smallest useful duration from the current context. The backend anchors that duration to the Live tool-call receive time, adjusts it into the client's frame timestamp clock using `session.hello.context.current_time`, and sends an explicit capture window in `rewind.save_request`.
 
 The backend uses `context.current_time`, `context.time_zone`, and `context.utc_offset_minutes` to resolve relative date phrases such as `today`, `yesterday`, `this morning`, `this week`, and `last week`. Clients should send an IANA timezone when available. Do not send latitude/longitude in `session.hello`; coordinates belong only in the out-of-band rewind commit upload after a save request.
 
@@ -296,7 +296,7 @@ Client behavior:
 3. Upload the selected frame references to `upload_url`.
 4. Include raw frame bytes only when `include_frame_images` is `true`.
 
-`capture_anchor_utc` is the UTC timestamp where the requested rewind ends. The backend stamps it when it receives the Gemini Live tool call, before embedding generation or pending-event persistence, so slower backend work does not shift the selected media window. `capture_duration_ms` is the authoritative duration for client frame selection; `rewind_duration_seconds` is kept for display and simple clients.
+`capture_anchor_utc` is the client-frame UTC timestamp where the requested rewind ends. The backend stamps the backend receive time when it receives the Gemini Live tool call, before embedding generation or pending-event persistence, then applies the estimated client clock offset from the handshake so the window aligns with the client's `captured_at` frame timestamps. Slower backend work does not shift the selected media window. `capture_duration_ms` is the authoritative duration for client frame selection; `rewind_duration_seconds` is kept for display and simple clients.
 
 Create/save requests do not target arbitrary dates or older memories. `last 20 seconds` or `last minute` in a save command means the current rolling device buffer ending at `capture_anchor_utc`. If the user asks for something from yesterday, last week, or another past period, the model should use `search_rewinds`, not `create_rewind`.
 
@@ -490,6 +490,12 @@ The Supabase RPC searches committed and pending events for the current user. It 
 - Metadata filters for entities, location, status, and time range.
 - Recency as a secondary tie-breaker after semantic/text relevance.
 
+The backend does not expose the nearest vectors blindly. Search results must pass at least one concrete relevance signal before they are sent to the client:
+
+- Pure vector-only matches need a meaningful cosine similarity floor.
+- Time-scoped searches use a slightly lower vector floor because the time filter is already narrowing the candidate set.
+- Full-text, entity, and location matches can pass as structured evidence.
+
 Postgres uses `pgvector` HNSW indexes for event and frame vectors, a GIN index for full-text search, and focused B-tree/GIN indexes for user, status, time, device, and entity filters.
 
 ## Listing And Fetching Rewinds
@@ -548,8 +554,9 @@ List/detail responses never include vector values or raw image bytes.
 1. Keep a local rolling frame buffer keyed by stable `device_frame_uuid`.
 2. Connect to `/v1/live` with stable user/device identity.
 3. Send `session.hello` immediately and wait for `session.ready`.
-4. Stream realtime audio and optional images through `user.media`.
-5. On `rewind.save_request`, upload the requested anchored frame window to `upload_url` over HTTP without blocking the live socket.
-6. On `rewind.search_results`, render result metadata and resolve `frame_refs[].device_frame_uuid` against the local frame cache.
-7. Use `POST /v1/rewinds/search` for manual search screens; it returns the same result shape as Live search.
-8. Treat embeddings, Gemini messages, and Supabase implementation details as backend internals.
+4. Capture the local rolling buffer independently from Gemini Live frame streaming. For example, keep 1 FPS for 60 seconds locally even if realtime Gemini frames are sent less often to save tokens.
+5. Stream realtime audio and optional images through `user.media`.
+6. On `rewind.save_request`, upload the requested anchored frame window to `upload_url` over HTTP without blocking the live socket.
+7. On `rewind.search_results`, render result metadata and resolve `frame_refs[].device_frame_uuid` against the local frame cache.
+8. Use `POST /v1/rewinds/search` for manual search screens; it returns the same result shape as Live search.
+9. Treat embeddings, Gemini messages, and Supabase implementation details as backend internals.

@@ -212,7 +212,8 @@ app.get('/v1/live', { websocket: true }, async (socket, request) => {
         tools: agent.getToolDeclarations(),
         user_agent: input.user_agent,
         client_session: clientSession.hello,
-        max_rewind_duration_seconds: clientSession.maxRewindDurationSeconds
+        max_rewind_duration_seconds: clientSession.maxRewindDurationSeconds,
+        client_clock_offset_ms: clientSession.clientClockOffsetMs
       }
     });
     liveContext = {
@@ -255,7 +256,8 @@ app.get('/v1/live', { websocket: true }, async (socket, request) => {
             device_id: input.device_id,
             last_user_text: input.get_last_user_text(),
             max_rewind_duration_seconds: clientSession.maxRewindDurationSeconds,
-            client_context: clientSession.hello.context
+            client_context: clientSession.hello.context,
+            client_clock_offset_ms: clientSession.clientClockOffsetMs
           },
           agent,
           toolCalls
@@ -270,6 +272,7 @@ app.get('/v1/live', { websocket: true }, async (socket, request) => {
 });
 
 function normalizeSessionHello(message: SessionHello, deviceId: string): NormalizedClientSession {
+  const receivedAtMs = Date.now();
   if (!message || typeof message !== 'object') {
     throw new Error('session.hello must be an object.');
   }
@@ -315,12 +318,14 @@ function normalizeSessionHello(message: SessionHello, deviceId: string): Normali
         max_frames: maxFrames
       }
     },
-    context: normalizeClientContext(message.context)
+    context: normalizeClientContext(message.context, receivedAtMs)
   };
+  const clientClockOffsetMs = Math.round(Date.parse(normalized.context?.current_time ?? utcIso(receivedAtMs)) - receivedAtMs);
   return {
     hello: normalized,
     bufferDurationMs,
-    maxRewindDurationSeconds: Math.max(1, Math.ceil(bufferDurationMs / 1000))
+    maxRewindDurationSeconds: Math.max(1, Math.ceil(bufferDurationMs / 1000)),
+    clientClockOffsetMs
   };
 }
 
@@ -331,16 +336,16 @@ function boundedInteger(value: unknown, options: { name: string; min: number; ma
   return value;
 }
 
-function normalizeClientContext(context: unknown): SessionHello['context'] {
+function normalizeClientContext(context: unknown, receivedAtMs = Date.now()): SessionHello['context'] {
   if (!context || typeof context !== 'object') {
     return {
-      current_time: utcIso(new Date()),
+      current_time: utcIso(receivedAtMs),
       utc_offset_minutes: 0
     };
   }
   const input = context as Record<string, unknown>;
   const timeZone = typeof input.time_zone === 'string' && isValidTimeZone(input.time_zone) ? input.time_zone : undefined;
-  const currentTime = isValidInstant(input.current_time) ? utcIso(input.current_time) : utcIso(new Date());
+  const currentTime = isValidInstant(input.current_time) ? utcIso(input.current_time) : utcIso(receivedAtMs);
   const utcOffsetMinutes =
     typeof input.utc_offset_minutes === 'number' && Number.isInteger(input.utc_offset_minutes) && input.utc_offset_minutes >= -840 && input.utc_offset_minutes <= 840
       ? input.utc_offset_minutes
@@ -547,6 +552,7 @@ async function runToolCalls(
     last_user_text?: string;
     max_rewind_duration_seconds?: number;
     client_context?: SessionHello['context'];
+    client_clock_offset_ms?: number;
   },
   agent: GeminiLiveAgent,
   toolCalls: ToolCall[]

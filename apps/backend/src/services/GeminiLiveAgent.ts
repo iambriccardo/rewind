@@ -335,6 +335,7 @@ export type NormalizedClientSession = {
   hello: SessionHello;
   bufferDurationMs: number;
   maxRewindDurationSeconds: number;
+  clientClockOffsetMs: number;
 };
 
 function normalizeFunctionCalls(calls: FunctionCall[], receivedAt: string): ToolCall[] {

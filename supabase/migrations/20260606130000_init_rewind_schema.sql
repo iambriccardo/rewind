@@ -195,6 +195,9 @@ as $$
 declare
   v_limit integer := greatest(1, least(coalesce(p_limit, 10), 50));
   v_candidate_limit integer := greatest(100, least(greatest(1, coalesce(p_limit, 10)) * 40, 1000));
+  v_vector_similarity_floor double precision := 0.64;
+  v_time_filtered_vector_similarity_floor double precision := 0.56;
+  v_text_rank_floor double precision := 0.000001;
 begin
   perform set_config('hnsw.ef_search', '100', true);
   perform set_config('hnsw.iterative_scan', 'strict_order', true);
@@ -357,6 +360,20 @@ begin
 	        ) * 40
 	      )::integer as relevance_bucket
 	    from scores s
+	  ),
+	  gated_scores as (
+	    select s.*
+	    from ranked_scores s
+	    cross join query_terms q
+	    where
+	      coalesce(s.text_rank, 0) >= v_text_rank_floor
+	      or (p_entities is not null and array_length(p_entities, 1) is not null)
+	      or q.location_text is not null
+	      or coalesce(s.display_similarity, -1) >= case
+	        when p_started_after is not null or p_ended_before is not null
+	          then v_time_filtered_vector_similarity_floor
+	        else v_vector_similarity_floor
+	      end
 	  )
 	  select
 	    e.id,
@@ -381,7 +398,7 @@ begin
     s.event_similarity,
 	    s.frame_similarity,
 	    coalesce(s.text_rank, 0)::double precision as text_rank
-	  from ranked_scores s
+	  from gated_scores s
 	  join public.rewind_events e on e.id = s.id
 	  order by
 	    s.relevance_bucket desc,

@@ -79,6 +79,7 @@ type ToolRouteInput = {
   toolCall: ToolCall;
   max_rewind_duration_seconds?: number;
   client_context?: SessionHello['context'];
+  client_clock_offset_ms?: number;
 };
 
 export class ToolRouter {
@@ -147,8 +148,9 @@ export class ToolRouter {
     const maxDurationSeconds = input.max_rewind_duration_seconds ?? 60;
     const rewindDurationSeconds = Math.max(1, Math.min(maxDurationSeconds, requestedDurationSeconds));
     const captureDurationMs = rewindDurationSeconds * 1000;
-    const captureAnchorUtc = normalizedToolReceivedAt(input.toolCall.received_at);
-    const captureAnchorMs = Date.parse(captureAnchorUtc);
+    const backendAnchorUtc = normalizedToolReceivedAt(input.toolCall.received_at);
+    const captureAnchorMs = Date.parse(backendAnchorUtc) + Math.round(input.client_clock_offset_ms ?? 0);
+    const captureAnchorUtc = utcIso(captureAnchorMs);
     const captureWindowStartedAt = new Date(captureAnchorMs - captureDurationMs).toISOString();
     const captureWindowEndedAt = captureAnchorUtc;
     const embeddingText = this.embeddings.buildEventEmbeddingText({
@@ -172,7 +174,9 @@ export class ToolRouter {
         capture_anchor_utc: captureAnchorUtc,
         capture_duration_ms: captureDurationMs,
         capture_window_started_at: captureWindowStartedAt,
-        capture_window_ended_at: captureWindowEndedAt
+        capture_window_ended_at: captureWindowEndedAt,
+        backend_capture_anchor_utc: backendAnchorUtc,
+        client_clock_offset_ms: input.client_clock_offset_ms ?? 0
       }
     });
 

@@ -418,11 +418,9 @@
         backendChecking: false,
         searchBusy: false,
         lastKnownLocation: null,
-        locationPermission: 'unknown',
         playbackFrames: [],
         playbackIndex: 0,
-        playbackTimer: null,
-        activePlaybackMemory: null
+        playbackTimer: null
       };
 
       const els = {
@@ -455,6 +453,10 @@
       function log(message, payload) {
         const line = `[${new Date().toLocaleTimeString()}] ${message}${payload ? `\n${JSON.stringify(payload, null, 2)}` : ''}\n`;
         els.log.textContent = line + els.log.textContent;
+      }
+
+      function utcIsoNow() {
+        return new Date().toISOString();
       }
 
       function protocolLog(kind, payload) {
@@ -617,7 +619,6 @@
             try {
               const geolocation = await navigator.permissions.query({ name: 'geolocation' });
               details.geolocation_permission = geolocation.state;
-              state.locationPermission = geolocation.state;
             } catch {
               details.geolocation_permission = 'unavailable';
             }
@@ -652,7 +653,7 @@
 
       function clientContext() {
         return {
-          current_time: new Date().toISOString(),
+          current_time: utcIsoNow(),
           time_zone: clientTimeZone(),
           utc_offset_minutes: clientUtcOffsetMinutes()
         };
@@ -669,7 +670,6 @@
                 accuracy_meters: Math.round(position.coords.accuracy || 0),
                 captured_at: new Date(position.timestamp || Date.now()).toISOString()
               };
-              state.locationPermission = 'granted';
               log('Location ready', {
                 accuracy_meters: state.lastKnownLocation.accuracy_meters,
                 captured_at: state.lastKnownLocation.captured_at
@@ -677,7 +677,6 @@
               resolve(state.lastKnownLocation);
             },
             (error) => {
-              state.locationPermission = error.code === error.PERMISSION_DENIED ? 'denied' : 'unavailable';
               log('Location unavailable', { code: error.code, message: error.message });
               resolve(null);
             },
@@ -934,14 +933,27 @@
         }
         const frame = {
           uuid: crypto.randomUUID(),
-          capturedAt: new Date().toISOString(),
+          capturedAt: utcIsoNow(),
           dataUrl: els.canvas.toDataURL('image/jpeg', FRAME_JPEG_QUALITY)
         };
         state.buffer.push(frame);
         state.assets.set(frame.uuid, frame);
-        state.buffer = state.buffer.slice(-FRAME_BUFFER_MAX_FRAMES);
+        pruneFrameBuffer(Date.parse(frame.capturedAt));
         void persistFrame(frame);
         return frame;
+      }
+
+      function pruneFrameBuffer(nowMs = Date.now()) {
+        const minCapturedAt = nowMs - FRAME_BUFFER_DURATION_MS;
+        const retained = state.buffer.filter((frame) => {
+          const captured = Date.parse(frame.capturedAt);
+          return Number.isFinite(captured) && captured >= minCapturedAt;
+        }).slice(-FRAME_BUFFER_MAX_FRAMES);
+        const retainedIds = new Set(retained.map((frame) => frame.uuid));
+        for (const frame of state.buffer) {
+          if (!retainedIds.has(frame.uuid)) state.assets.delete(frame.uuid);
+        }
+        state.buffer = retained;
       }
 
       function persistFrame(frame) {
@@ -1044,7 +1056,7 @@
           mime_type: `audio/pcm;rate=${AUDIO_SAMPLE_RATE}`,
           data: int16ToBase64(samples),
           seq: ++state.mediaSeq,
-          timestamp: new Date().toISOString()
+          timestamp: utcIsoNow()
         });
       }
 
@@ -1165,11 +1177,13 @@
 
       async function captureAndUploadRewind(request) {
         try {
-          if (!state.buffer.length) captureFrame();
+          if (!state.buffer.length && state.streaming && !state.videoHidden) captureFrame();
+          if (!state.buffer.length) throw new Error('No local frame buffer is available for this rewind.');
           await refreshGeolocation({ timeoutMs: 1500, maximumAgeMs: 60_000 });
           const window = captureWindow(request);
           const durationMs = Math.min(FRAME_BUFFER_DURATION_MS, window.durationMs);
           const frames = selectBufferedFrames(window);
+          if (!frames.length) throw new Error('No buffered frames matched the requested rewind window.');
           await persistFrames(frames);
           renderSavedMemory(request, frames.length, 'uploading');
           const upload = {
@@ -1251,8 +1265,7 @@
         const durationMs = captureDurationMs(request);
         const anchorMs = Date.parse(request.capture_anchor_utc || request.capture_window_ended_at || '');
         const endedAtMs = Number.isFinite(anchorMs) ? anchorMs : Date.now();
-        const explicitStartedAtMs = Date.parse(request.capture_window_started_at || '');
-        const startedAtMs = Number.isFinite(explicitStartedAtMs) ? explicitStartedAtMs : endedAtMs - durationMs;
+        const startedAtMs = endedAtMs - durationMs;
         return {
           anchorUtc: new Date(endedAtMs).toISOString(),
           durationMs,
@@ -1262,20 +1275,21 @@
       }
 
       function selectBufferedFrames(window) {
-        const fallback = state.buffer.at(-1);
-        if (!state.buffer.length) return fallback ? [fallback] : [];
+        pruneFrameBuffer(Date.now());
+        if (!state.buffer.length) return [];
         const selected = state.buffer.filter((frame) => {
           const captured = Date.parse(frame.capturedAt);
           return Number.isFinite(captured) && captured >= window.startedAtMs && captured <= window.endedAtMs;
         });
         if (selected.length) return selected;
+        const toleranceMs = Math.max(2_000, LOCAL_FRAME_CAPTURE_INTERVAL_MS * 2);
         const nearestPastFrame = [...state.buffer]
           .reverse()
           .find((frame) => {
             const captured = Date.parse(frame.capturedAt);
-            return Number.isFinite(captured) && captured <= window.endedAtMs;
+            return Number.isFinite(captured) && captured <= window.endedAtMs && captured >= window.startedAtMs - toleranceMs;
           });
-        return [nearestPastFrame || fallback].filter(Boolean);
+        return nearestPastFrame ? [nearestPastFrame] : [];
       }
 
       function renderTimeline(frameRefs) {

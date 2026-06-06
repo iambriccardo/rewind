@@ -136,7 +136,7 @@ The simulator also has:
 - `Mute Mic`: disables microphone tracks without closing the WebSocket.
 - `Frame every`: controls how often camera frames are forwarded to Gemini Live.
 
-The demo keeps realtime media cheap by default: camera frames are resized to a 384px max edge, encoded as moderate-quality JPEGs, and forwarded to Gemini Live at 1 FPS by default. The `Frame every` control can raise that interval up to 60 seconds to reduce Live API media tokens. The rolling frame buffer still captures locally at 1 FPS for 60 seconds, so rewind commits keep useful temporal coverage even when realtime model observation is throttled. If Gemini ever omits an explicit rewind duration, the app falls back to an 8-second capture window. A rewind indexes at most 12 frame embeddings. Audio is downsampled in the browser to 16 kHz little-endian PCM and sent in 250 ms chunks with `audio/pcm;rate=16000`.
+The demo keeps realtime media cheap by default: camera frames are resized to a 384px max edge, encoded as moderate-quality JPEGs, and forwarded to Gemini Live at 1 FPS by default. The `Frame every` control can raise that interval up to 60 seconds to reduce Live API media tokens. The rolling frame buffer is independent and still captures locally at 1 FPS for 60 seconds, so rewind commits keep useful temporal coverage even when realtime model observation is throttled. If Gemini ever omits an explicit rewind duration, the app falls back to an 8-second capture window. A rewind indexes at most 12 frame embeddings. Audio is downsampled in the browser to 16 kHz little-endian PCM and sent in 250 ms chunks with `audio/pcm;rate=16000`.
 
 ## Client Protocol
 
@@ -171,7 +171,7 @@ First message after WebSocket open:
 }
 ```
 
-The backend uses `buffers.rewind.duration_ms` to configure the Gemini Live tool schema and prompt. `create_rewind` is optimized for the current or just-finished moment, not arbitrary historical capture. If the user says `save the last 20 seconds` or `remind me about the last minute`, the model uses that rolling-buffer duration, clamped to the available buffer; otherwise it infers the smallest useful replay window. The backend then anchors the save request to the UTC time when the Gemini Live tool call is received and sends an explicit capture window so client uploads are not shifted by later backend or network delay.
+The backend uses `buffers.rewind.duration_ms` to configure the Gemini Live tool schema and prompt. `create_rewind` is optimized for the current or just-finished moment, not arbitrary historical capture. If the user says `save the last 20 seconds` or `remind me about the last minute`, the model uses that rolling-buffer duration, clamped to the available buffer; otherwise it infers the smallest useful replay window. The backend anchors the save request to the Gemini Live tool-call receive time, adjusts it into the client's frame timestamp clock using the handshake time, and sends an explicit capture window so client uploads are not shifted by later backend or network delay.
 
 After `session.ready`, the client may stream text/media:
 
@@ -361,6 +361,7 @@ The vector search path follows current pgvector/Supabase guidance for this scale
 - `vector_cosine_ops` matches Gemini embeddings and the backend normalizes vectors before storage.
 - `hnsw.ef_search=100`, `hnsw.iterative_scan=strict_order`, and larger scan guardrails are set inside the search RPC so filtered user/status queries can recover enough candidates.
 - Search fetches more candidates than the final limit, then hybrid-ranks semantic similarity plus full-text rank.
+- Search applies a DB-side relevance gate before returning results. Pure vector-only matches need a cosine similarity of at least `0.64`; searches with an explicit time filter can use `0.56`; exact full-text, entity, or location evidence can pass without relying on vague semantic similarity alone.
 - Recency is a tie-breaker inside relevance buckets, not part of the embedding and not a global boost.
 - Relative date search is resolved outside embeddings. `today`, `yesterday`, `this week`, `last week`, `this month`, `last month`, and `last N days/weeks/months` become explicit UTC time ranges using the client timezone.
 
