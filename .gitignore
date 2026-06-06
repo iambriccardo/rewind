@@ -4,9 +4,16 @@ dist/
 .env.backend
 .env.web
 .env.local
+.env.*
+!.env.*.example
 .data/
 .docker/
 certs/
 .idea/
 *.log
 .DS_Store
+
+# Xcode local/user state. Keep project/workspace files once the iOS app exists.
+DerivedData/
+*.xcuserstate
+xcuserdata/

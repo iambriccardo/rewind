@@ -395,7 +395,9 @@ The agent prompt is intentionally passive and optimized for a realtime voice loo
 - It uses short, explicit sections and two narrow tools only.
 - Native audio sessions use Google Live `v1alpha` plus `proactivity.proactiveAudio=true`, so irrelevant background audio can be ignored.
 - Gemini server-side activity detection stays enabled, with low media resolution and audio/video turn coverage so recent video context is available when speech is vague.
-- `create_rewind` is only emitted after explicit save/remember intent. It must include `rewind_duration_seconds`, a concise title/description, and inferred `entities`; duration is bounded by `session.hello.buffers.rewind.duration_ms` and should be the smallest useful replay window.
+- `create_rewind` is only emitted after explicit save/remember/capture/bookmark/log intent. The prompt accepts clear variants such as "do not let me forget this" or "record this for later", and generalizes across languages when the user directly asks to preserve the current context without listing non-English examples.
+- Privacy is stricter than recall flexibility: ambient conversation, "look at this", "this is interesting", surprise, narration, or uncertain phrases should not create rewinds. Ambiguous save intent should stay passive or get a brief clarification.
+- A save request must include `rewind_duration_seconds`, a concise title/description, and inferred `entities`; duration is bounded by `session.hello.buffers.rewind.duration_ms` and should be the smallest useful replay window.
 - Vague phrases such as `remember where I put this` should resolve `this` from recent camera/audio context. Entities should include concrete visible objects, surfaces, containers, places, readable labels/text, and actions when useful for search.
 
 ## Embedding Modes

@@ -6,7 +6,9 @@ npm-debug.log
 .env
 .env.backend
 .env.web
+.env.*
 .DS_Store
+certs
 apps/ios
 apps/web
 docs

@@ -8,3 +8,4 @@
 - Backend persistence must be Supabase only. Local development means the Supabase CLI local stack with pgvector, not JSON/file-backed persistence.
 - Do not create, deploy, or modify Supabase Edge Functions for this project unless the user explicitly asks for Edge Functions. The current architecture is the local/backend API plus Supabase tables/RPC only.
 - Do not probe, query, migrate, push to, deploy to, or otherwise touch the remote Supabase project unless the user explicitly asks for remote database work. Default validation should run locally.
+- Never commit real secrets, hosted database service-role keys, model API keys, database passwords, private cert keys, `.env.backend`, `.env.web`, `.data/`, or `.docker/` runtime files. Keep examples placeholder-only.
