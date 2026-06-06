@@ -21,7 +21,7 @@ Local MVP for a real-time rewind memory agent. The backend accepts a live device
 ```txt
 apps/backend/   Fastify API, Gemini Live agent loop, Supabase repository, Dockerfile
 apps/web/       Browser phone simulator and local ephemeral device-frame store UI
-apps/ios/       Empty placeholder for the native iOS app
+apps/ios/       Native iOS app project
 docs/           Client protocol and implementer documentation
 scripts/        Root-level local, Docker, and web runner scripts
 supabase/       Supabase CLI config, migration, and seed files
