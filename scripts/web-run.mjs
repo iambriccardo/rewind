@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 
@@ -42,11 +42,6 @@ async function routeRequest(request, response) {
 
   if (url.pathname === '/device/frames' && request.method === 'POST') {
     await saveFrame(request, response);
-    return;
-  }
-
-  if (url.pathname === '/device/frames' && request.method === 'DELETE') {
-    clearFrames(response);
     return;
   }
 
@@ -92,7 +87,6 @@ async function saveFrame(request, response) {
   const metadata = {
     device_frame_uuid: frameId,
     captured_at: payload.captured_at || payload.capturedAt || new Date().toISOString(),
-    caption: payload.caption || null,
     mime_type: mimeType,
     byte_length: imageBuffer.length,
     stored_at: new Date().toISOString()
@@ -136,13 +130,6 @@ function sendFrame(frameIdValue, imageOnly, response) {
     'Cache-Control': 'no-store'
   });
   response.end(readFileSync(paths.image));
-}
-
-function clearFrames(response) {
-  rmSync(frameStoreDir, { recursive: true, force: true });
-  mkdirSync(frameStoreDir, { recursive: true });
-  response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-  response.end(JSON.stringify({ ok: true }));
 }
 
 function framePaths(frameId) {

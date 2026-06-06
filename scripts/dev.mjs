@@ -20,8 +20,8 @@ if (options.help) {
   process.exit(0);
 }
 
-if (!['json', 'local', 'remote'].includes(options.data)) {
-  fail(`Unknown --data value "${options.data}". Use json, local, or remote.`);
+if (!['local', 'remote'].includes(options.data)) {
+  fail(`Unknown --data value "${options.data}". Use local or remote.`);
 }
 
 if (!['none', 'backend', 'web', 'both'].includes(options.open)) {
@@ -39,10 +39,7 @@ const env = {
   PORT: String(port)
 };
 
-if (options.data === 'json') {
-  env.REPOSITORY_MODE = 'local';
-} else if (options.data === 'local') {
-  env.REPOSITORY_MODE = 'supabase';
+if (options.data === 'local') {
   assertDockerRunning();
   const supabaseAlreadyRunning = isHttpOk('http://127.0.0.1:54321/rest/v1/');
   if (supabaseAlreadyRunning) {
@@ -58,7 +55,11 @@ if (options.data === 'json') {
   }
   Object.assign(env, readSupabaseLocalEnv());
 } else {
-  env.REPOSITORY_MODE = 'supabase';
+  env.SUPABASE_URL = process.env.SUPABASE_URL ?? dotenv.SUPABASE_URL ?? '';
+  env.SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? dotenv.SUPABASE_SERVICE_ROLE_KEY ?? '';
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+    fail('Remote mode requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.backend or the shell environment.');
+  }
 }
 
 if (!(dotenv.MODEL_API_KEY ?? process.env.MODEL_API_KEY)) {
@@ -70,7 +71,6 @@ console.log('Rewind local runner');
 console.log(`- backend: ${appUrl}`);
 console.log(`- phone web app: ${webUrl} (start with npm run web)`);
 console.log(`- data: ${options.data}`);
-console.log(`- repository mode: ${env.REPOSITORY_MODE}`);
 console.log('');
 
 if (backendAlreadyRunning) {
@@ -106,7 +106,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 
 function parseArgs(args) {
   const parsed = {
-    data: 'json',
+    data: 'local',
     open: 'backend',
     openDelay: 1200,
     resetDb: false,
@@ -122,9 +122,6 @@ function parseArgs(args) {
       case '--data':
       case '--mode':
         parsed.data = normalizeData(nextValue());
-        break;
-      case '--json':
-        parsed.data = 'json';
         break;
       case '--local':
         parsed.data = 'local';
@@ -168,7 +165,6 @@ function parseArgs(args) {
 }
 
 function normalizeData(value) {
-  if (value === 'local-json' || value === 'local-file' || value === 'file') return 'json';
   if (value === 'local-supabase' || value === 'supabase-local') return 'local';
   if (value === 'hosted' || value === 'supabase-remote') return 'remote';
   return value;
@@ -252,7 +248,6 @@ Start OrbStack or Docker Desktop, then rerun:
   npm run dev:all -- --data local --reset-db
 
 Alternatives:
-  npm run dev:json
   npm run dev:remote
 
 Docker check failed:
@@ -273,8 +268,7 @@ function printHelp() {
   npm run dev:all -- [options]
 
 Data targets:
-  --data json       Run with local JSON persistence only. Fastest demo path. Default.
-  --data local      Start local Supabase, inject its env, and run the backend against it.
+  --data local      Start local Supabase, inject its env, and run the backend against it. Default.
   --data remote     Run against SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY from .env.backend.
 
 App opening:
@@ -289,7 +283,7 @@ Other options:
   --help            Show this message.
 
 Shortcuts:
-  --json, --local, --remote, --web, --both, --no-open
+  --local, --remote, --web, --both, --no-open
 
 The runner reuses already-running backend and local Supabase services. It does not
 kill listeners, stop containers, or restart services that are already available.

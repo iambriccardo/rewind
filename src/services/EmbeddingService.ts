@@ -6,14 +6,10 @@ import { normalizeVector } from '../utils/vector.js';
 
 const FRAME_EMBEDDING_MAX_PER_REWIND = 12;
 const EMBEDDING_CACHE_SIZE = 512;
-const FRAME_DESCRIPTION_CACHE_SIZE = 256;
-const FRAME_SUMMARY_SYSTEM_INSTRUCTION =
-  'Describe phone camera frames for semantic retrieval. Return one compact sentence with concrete objects, places, visible text, actions, and spatial hints. Do not add speculation.';
 
 export class EmbeddingService {
   private readonly ai: GoogleGenAI;
   private readonly embeddingCache = new LruCache<string, Promise<number[]>>(EMBEDDING_CACHE_SIZE);
-  private readonly frameDescriptionCache = new LruCache<string, Promise<string>>(FRAME_DESCRIPTION_CACHE_SIZE);
 
   constructor() {
     if (!config.MODEL_API_KEY) {
@@ -64,30 +60,12 @@ export class EmbeddingService {
     return pending;
   }
 
-  async embedImage(input: { base64: string; mimeType: string; textHint?: string }): Promise<number[]> {
-    const result = await this.embedFrameImage(input);
-    return result.embedding;
-  }
-
-  async embedFrameImage(input: { base64: string; mimeType: string; textHint?: string }): Promise<{ embedding: number[]; description: string }> {
-    if (isEmbeddingModel(config.IMAGE_EMBEDDING_MODEL)) {
-      const description = input.textHint?.trim() || 'Phone camera frame from a rewind memory.';
-      const embedding = await this.embedMultimodalFrame(input, description);
-      return { embedding, description };
-    }
-    const description = await this.describeFrame(input);
-    const embedding = await this.embedDocument(description);
-    return { embedding, description };
-  }
-
-  private async embedMultimodalFrame(input: { base64: string; mimeType: string; textHint?: string }, description: string): Promise<number[]> {
-    const textHint = input.textHint?.trim() ?? '';
+  async embedFrameImage(input: { base64: string; mimeType: string }): Promise<number[]> {
     const cacheKey = [
       'image',
       config.IMAGE_EMBEDDING_MODEL,
       config.EMBEDDING_DIMENSION,
       input.mimeType,
-      hashText(textHint),
       hashText(input.base64)
     ].join(':');
     const cached = this.embeddingCache.get(cacheKey);
@@ -96,10 +74,7 @@ export class EmbeddingService {
     const pending = this.ai.models
       .embedContent({
         model: config.IMAGE_EMBEDDING_MODEL,
-        contents: [
-          createPartFromBase64(input.base64, input.mimeType),
-          prepareEmbeddingText(description, 'RETRIEVAL_DOCUMENT', config.IMAGE_EMBEDDING_MODEL)
-        ],
+        contents: createPartFromBase64(input.base64, input.mimeType),
         config: embeddingConfig('RETRIEVAL_DOCUMENT', config.IMAGE_EMBEDDING_MODEL)
       })
       .then((response) => {
@@ -117,41 +92,6 @@ export class EmbeddingService {
     return pending;
   }
 
-  async describeFrame(input: { base64: string; mimeType: string; textHint?: string }): Promise<string> {
-    const textHint = input.textHint?.trim() ?? '';
-    const cacheKey = ['frame', config.IMAGE_EMBEDDING_MODEL, input.mimeType, hashText(textHint), hashText(input.base64)].join(':');
-    const cached = this.frameDescriptionCache.get(cacheKey);
-    if (cached) return cached;
-
-    const pending = this.ai.models
-      .generateContent({
-        model: config.IMAGE_EMBEDDING_MODEL,
-        contents: [
-          createPartFromBase64(input.base64, input.mimeType),
-          textHint ? `Known local frame caption: ${textHint}\nWrite the retrieval description.` : 'Write the retrieval description.'
-        ],
-        config: {
-          systemInstruction: FRAME_SUMMARY_SYSTEM_INSTRUCTION,
-          temperature: 0,
-          maxOutputTokens: 96,
-          responseMimeType: 'text/plain'
-        }
-      })
-      .then((response) => {
-        const text = response.text?.trim();
-        if (!text) {
-          throw new Error('Gemini image description response did not include text.');
-        }
-        return text;
-      })
-      .catch((error) => {
-        this.frameDescriptionCache.delete(cacheKey);
-        throw error;
-      });
-    this.frameDescriptionCache.set(cacheKey, pending);
-    return pending;
-  }
-
   shouldEmbedFrameImages(): boolean {
     return config.EMBEDDING_MODE === 'text_and_image' && FRAME_EMBEDDING_MAX_PER_REWIND > 0;
   }
@@ -165,16 +105,14 @@ export class EmbeddingService {
     description?: string;
     entities?: string[];
     location_hint?: string | null;
-    frame_captions?: string[];
     metadata?: JsonObject;
   }): string {
     const parts = [
-      input.title,
-      input.description,
-      input.entities?.length ? `Entities: ${input.entities.join(', ')}` : undefined,
-      input.location_hint ? `Location: ${input.location_hint}` : undefined,
-      input.frame_captions?.length ? `Frame captions: ${input.frame_captions.join(' | ')}` : undefined,
-      input.metadata ? `Metadata: ${JSON.stringify(input.metadata)}` : undefined
+      input.title ? `Title: ${input.title}` : undefined,
+      input.description ? `Summary: ${input.description}` : undefined,
+      input.entities?.length ? `Search entities: ${input.entities.join(', ')}` : undefined,
+      input.location_hint ? `Location hint: ${input.location_hint}` : undefined,
+      input.metadata ? `Additional retrieval context: ${JSON.stringify(input.metadata)}` : undefined
     ];
     return parts.filter(Boolean).join('\n');
   }
@@ -184,10 +122,6 @@ function hashText(value: string): string {
   return createHash('sha256').update(value).digest('base64url');
 }
 
-function isEmbeddingModel(model: string): boolean {
-  return model.includes('embedding');
-}
-
 function isEmbedding2(model: string): boolean {
   return model.includes('embedding-2');
 }
@@ -195,14 +129,22 @@ function isEmbedding2(model: string): boolean {
 function prepareEmbeddingText(text: string, taskType: string, model: string): string {
   if (!isEmbedding2(model)) return text;
   if (taskType === 'RETRIEVAL_QUERY') return `task: search result | query: ${text}`;
-  if (taskType === 'RETRIEVAL_DOCUMENT') return `title: rewind memory | text: ${text}`;
+  if (taskType === 'RETRIEVAL_DOCUMENT') return `title: Rewind memory | text: ${text}`;
   return text;
 }
 
 function embeddingConfig(taskType: string, model: string) {
-  return isEmbedding2(model)
-    ? { outputDimensionality: config.EMBEDDING_DIMENSION }
-    : { taskType, outputDimensionality: config.EMBEDDING_DIMENSION };
+  if (isEmbedding2(model)) {
+    return {
+      outputDimensionality: config.EMBEDDING_DIMENSION
+    };
+  }
+
+  return {
+    taskType,
+    outputDimensionality: config.EMBEDDING_DIMENSION,
+    ...(taskType === 'RETRIEVAL_DOCUMENT' ? { title: 'Rewind memory' } : {})
+  };
 }
 
 class LruCache<K, V> {

@@ -2,6 +2,7 @@ import {
   GoogleGenAI,
   MediaResolution,
   Modality,
+  TurnCoverage,
   type FunctionCall,
   type FunctionResponse,
   type LiveConnectConfig,
@@ -12,7 +13,7 @@ import {
 import { config } from '../config.js';
 import type { ClientMessage, JsonObject, ToolCall } from '../types.js';
 
-const SUPPORTED_TOOLS = ['create_rewind', 'search_rewinds', 'show_rewind'] as const;
+const SUPPORTED_TOOLS = ['create_rewind', 'search_rewinds'] as const;
 type SupportedToolName = (typeof SUPPORTED_TOOLS)[number];
 type LiveState = 'connecting' | 'transport_open' | 'connected' | 'closed' | 'error';
 type QueuedLiveInput =
@@ -43,7 +44,7 @@ export class GeminiLiveAgent {
     if (!config.MODEL_API_KEY) {
       throw new Error('MODEL_API_KEY is required.');
     }
-    this.ai = new GoogleGenAI({ apiKey: config.MODEL_API_KEY });
+    this.ai = new GoogleGenAI({ apiKey: config.MODEL_API_KEY, httpOptions: { apiVersion: 'v1alpha' } });
   }
 
   getToolDeclarations(): JsonObject[] {
@@ -57,9 +58,21 @@ export class GeminiLiveAgent {
           additionalProperties: false,
           properties: {
             title: { type: 'string' },
-            description: { type: 'string' },
-            entities: { type: 'array', items: { type: 'string' } },
-            location_hint: { type: 'string' },
+            description: {
+              type: 'string',
+              description:
+                'A compact memory summary inferred from the user request plus recent audio/video context. Resolve vague references like this, that, here, or where I put this by using visible objects, actions, and spatial context.'
+            },
+            entities: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'Concrete searchable entities inferred from the utterance and recent camera/audio context: objects, people, places, visible labels/text, surfaces, containers, and actions. Include the likely referent even when the user only says this or that.'
+            },
+            location_hint: {
+              type: 'string',
+              description: 'Short physical/spatial hint inferred from the scene, such as desk, kitchen counter, backpack, shelf, table, or room.'
+            },
             rewind_duration_seconds: {
               type: 'integer',
               minimum: 1,
@@ -67,7 +80,7 @@ export class GeminiLiveAgent {
               description: 'How many seconds of the phone rolling buffer should be preserved for this rewind.'
             }
           },
-          required: ['title', 'description', 'rewind_duration_seconds']
+          required: ['title', 'description', 'entities', 'rewind_duration_seconds']
         }
       },
       {
@@ -88,24 +101,18 @@ export class GeminiLiveAgent {
                 ended_before: { type: 'string' }
               }
             },
-            entities: { type: 'array', items: { type: 'string' } },
-            location_hint: { type: 'string' }
+            entities: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'Concrete entities from the search request and likely synonyms. Use these only when they narrow the database search.'
+            },
+            location_hint: {
+              type: 'string',
+              description: 'Optional physical/spatial hint when the user asks about a specific place or surface.'
+            }
           },
           required: ['query']
-        }
-      },
-      {
-        name: 'show_rewind',
-        description:
-          'Show a selected rewind on the trusted phone. Only call after search_rewinds or when the event_id is known and validated by the backend.',
-        parametersJsonSchema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            event_id: { type: 'string' },
-            answer_text: { type: 'string' }
-          },
-          required: ['event_id']
         }
       }
     ];
@@ -249,11 +256,11 @@ export class GeminiLiveAgent {
     const outputTranscript = message.serverContent?.outputTranscription?.text;
     if (outputTranscript) callbacks.onText(outputTranscript);
     for (const part of message.serverContent?.modelTurn?.parts ?? []) {
+      if (part.text) callbacks.onText(part.text);
       if (part.inlineData?.data) {
         callbacks.onAudio(part.inlineData.data, part.inlineData.mimeType ?? 'audio/pcm;rate=24000');
       }
     }
-    if (message.text) callbacks.onText(message.text);
     if (message.sessionResumptionUpdate) {
       callbacks.onState('connected', {
         session_resumption: message.sessionResumptionUpdate
@@ -300,13 +307,21 @@ export class GeminiLiveAgent {
       maxOutputTokens: 256,
       mediaResolution: MediaResolution.MEDIA_RESOLUTION_LOW,
       systemInstruction: systemInstruction(),
-      tools: this.getGeminiTools()
+      tools: this.getGeminiTools(),
+      realtimeInputConfig: {
+        turnCoverage: TurnCoverage.TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO,
+        automaticActivityDetection: {
+          disabled: false,
+          silenceDurationMs: 700
+        }
+      }
     };
 
     if (usesNativeAudioModel(config.LIVE_MODEL_NAME)) {
       liveConfig.inputAudioTranscription = {};
       liveConfig.outputAudioTranscription = {};
       liveConfig.thinkingConfig = { thinkingBudget: 0 };
+      liveConfig.proactivity = { proactiveAudio: true };
     }
 
     return liveConfig;
@@ -329,17 +344,35 @@ function usesNativeAudioModel(model: string): boolean {
 
 function systemInstruction(): string {
   return [
-    'You are Rewind, a quiet real-time memory agent behind a trusted phone client.',
-    'The phone owns camera/audio rolling buffers and local media. For this MVP, the backend stores structured metadata, frame UUIDs, timestamps, captions, labels, location hints, and event embeddings. Do not ask to store raw image/video bytes.',
-    'Default behavior is passive observation. Background audio, video, or images alone are not a reason to call a tool or send a message.',
-    'Only call tools when the user clearly asks to create/save/remember/capture a rewind, or asks to search/find/show a previous rewind.',
-    'Broad create_rewind intents include: "remember this", "save that I did this", "remember where I put X", "capture this", "save this moment", "remember where I left X", "make a rewind of this", and similar phrasing.',
-    'For create_rewind, always include rewind_duration_seconds. Pick a compact duration that fits the request: usually 5-10 seconds, longer only if the user asks for more context.',
-    'For create_rewind, include only a concise title, useful description, rewind_duration_seconds, entities, and optional location_hint.',
-    'Use search_rewinds when the user asks where something is, what happened, or asks to find/search/show a memory.',
-    'For search_rewinds, include only useful narrowing filters: entities, time_range, and location_hint.',
-    'After search_rewinds returns useful candidates, call show_rewind for the best candidate unless the user only asked for a textual answer.',
-    'When calling show_rewind, rely on backend-validated event IDs and frame UUIDs. Never invent event IDs or frame IDs.',
-    'Keep tool arguments compact and structured. The backend validates every tool call and converts tool calls into trusted phone commands.'
+    '# Role',
+    '- You are Rewind, a quiet real-time memory agent behind a trusted phone client.',
+    '- The phone owns camera/audio rolling buffers and local media. The backend stores structured memory metadata, frame UUIDs, timestamps, location hints, and embeddings.',
+    '',
+    '# Default Behavior',
+    '- STAY PASSIVE unless the user asks to remember/save/capture something or asks to search/find/show a previous memory.',
+    '- Background audio, video, or images alone are observation context only. Do not talk just because something changed on camera.',
+    '- Do not ask to store raw image/video bytes. The trusted device handles frame upload after a save request.',
+    '',
+    '# Create Rewind',
+    '- Call create_rewind for requests like: "remember this", "save that I did this", "remember where I put this", "remember where I left X", "capture this", "save this moment", or similar phrasing.',
+    '- ALWAYS include rewind_duration_seconds. Use 5-10 seconds by default. Use a longer duration only when the user asks for more context.',
+    '- Infer the memory from ALL RECENT CONTEXT: the user words, audio history, visible camera frames, visible text, object positions, places, surfaces, and actions.',
+    '- If the user says "this", "that", "it", "here", or "where I put this", resolve the referent from the camera/video context.',
+    '- entities is REQUIRED. Include concrete searchable labels: objects, people, places, surfaces, containers, visible text/brands, and actions. Use short noun phrases. Avoid generic words like thing, stuff, object, moment, memory.',
+    '- description must be a compact retrieval summary: what happened, what object/action matters, where it is, and the spatial relationship that would help future search.',
+    '- title should be short and human-readable.',
+    '- location_hint is optional but should be included for useful physical hints such as desk, table, shelf, drawer, kitchen counter, backpack, room, or visible area.',
+    '- Keep create_rewind arguments compact. Do not include raw transcripts, protocol details, base64, frame IDs, or unnecessary metadata.',
+    '',
+    '# Search Rewinds',
+    '- Call search_rewinds when the user asks where something is, what happened, or asks to find/search/show a memory.',
+    '- query should preserve the natural user request plus the likely referent if visible/audible context clarifies it.',
+    '- Add entities, time_range, or location_hint only when they narrow the search.',
+    '- Search results are returned directly to the phone client by the backend. Do not ask for a second show/display action.',
+    '',
+    '# Tool Discipline',
+    '- Use only the two available tools.',
+    '- Do not invent fields. Match the JSON schema exactly.',
+    '- Prefer one correct tool call over conversational filler. Keep spoken/text responses minimal.'
   ].join('\n');
 }

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, resolve } from 'node:path';
 
 const root = resolve(new URL('.', import.meta.url).pathname, '..');
 const options = parseArgs(process.argv.slice(2));
@@ -15,8 +16,8 @@ if (options.help) {
   process.exit(0);
 }
 
-if (!['json', 'local', 'remote'].includes(options.data)) {
-  fail(`Unknown --data value "${options.data}". Use json, local, or remote.`);
+if (!['local', 'remote'].includes(options.data)) {
+  fail(`Unknown --data value "${options.data}". Use local or remote.`);
 }
 
 assertDockerRunning();
@@ -24,23 +25,16 @@ assertDockerRunning();
 const env = {
   ...process.env,
   ...dotenv,
-  REWIND_PORT: hostPort,
-  SERVE_DEMO_APP: 'false'
+  REWIND_PORT: hostPort
 };
 
-if (options.data === 'json') {
-  env.REPOSITORY_MODE = 'local';
-  env.SUPABASE_URL = '';
-  env.SUPABASE_SERVICE_ROLE_KEY = '';
-} else if (options.data === 'remote') {
-  env.REPOSITORY_MODE = 'supabase';
+if (options.data === 'remote') {
   env.SUPABASE_URL = process.env.SUPABASE_URL ?? dotenv.SUPABASE_URL ?? '';
   env.SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? dotenv.SUPABASE_SERVICE_ROLE_KEY ?? '';
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
     fail('Remote mode requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.backend or the shell environment.');
   }
 } else {
-  env.REPOSITORY_MODE = 'supabase';
   ensureLocalSupabase(options.resetDb);
   const localSupabase = readSupabaseLocalEnv();
   env.SUPABASE_URL = 'http://host.docker.internal:54321';
@@ -58,8 +52,16 @@ console.log(`- data: ${options.data}`);
 console.log(`- backend: ${appUrl}`);
 console.log('');
 
-writeRuntimeEnv(env);
-runCompose(['up', '--build', '--force-recreate', '-d', 'rewind'], env);
+const runtimeEnvFile = writeRuntimeEnv(env);
+cleanupLegacyComposeProject(env);
+try {
+  runCompose(['up', '--build', '--force-recreate', '-d', 'rewind'], {
+    ...env,
+    REWIND_BACKEND_ENV_FILE: runtimeEnvFile
+  });
+} finally {
+  removeRuntimeEnv(runtimeEnvFile);
+}
 
 waitForHealth(appUrl);
 
@@ -71,7 +73,7 @@ console.log('- phone web app: npm run web');
 
 function parseArgs(args) {
   const parsed = {
-    data: 'remote',
+    data: 'local',
     open: true,
     resetDb: false,
     help: false
@@ -86,9 +88,6 @@ function parseArgs(args) {
       case '--data':
       case '--mode':
         parsed.data = normalizeData(nextValue());
-        break;
-      case '--json':
-        parsed.data = 'json';
         break;
       case '--local':
         parsed.data = 'local';
@@ -126,7 +125,6 @@ function parseArgs(args) {
 }
 
 function normalizeData(value) {
-  if (value === 'local-json' || value === 'file') return 'json';
   if (value === 'local-supabase' || value === 'supabase-local') return 'local';
   if (value === 'hosted' || value === 'supabase-remote') return 'remote';
   return value;
@@ -167,37 +165,57 @@ function readSupabaseLocalEnv() {
 }
 
 function writeRuntimeEnv(env) {
-  const runtimeDir = resolve(root, '.docker');
-  mkdirSync(runtimeDir, { recursive: true });
+  cleanupLegacyRuntimeEnv();
+  const runtimeDir = mkdtempSync(resolve(tmpdir(), 'rewind-backend-env-'));
   const allowedKeys = [
     'DEV_DEVICE_ID',
     'DEV_HTTPS',
     'DEV_USER_ID',
     'EMBEDDING_MODE',
+    'IMAGE_EMBEDDING_MODEL',
     'LIVE_MODEL_NAME',
     'MODEL_API_KEY',
-    'REPOSITORY_MODE',
-    'SERVE_DEMO_APP',
     'SUPABASE_SERVICE_ROLE_KEY',
     'SUPABASE_URL',
+    'TEXT_EMBEDDING_MODEL',
     'TLS_CERT_PATH',
     'TLS_KEY_PATH'
   ];
   const lines = allowedKeys
     .filter((key) => env[key] !== undefined)
     .map((key) => `${key}=${String(env[key]).replace(/\n/g, '')}`);
-  writeFileSync(resolve(runtimeDir, 'rewind.env'), `${lines.join('\n')}\n`);
+  const envFile = resolve(runtimeDir, 'backend.env');
+  writeFileSync(envFile, `${lines.join('\n')}\n`, { mode: 0o600 });
+  return envFile;
+}
+
+function removeRuntimeEnv(envFile) {
+  try {
+    const runtimeDir = dirname(envFile);
+    unlinkSync(envFile);
+    rmSync(runtimeDir, { recursive: true, force: true });
+  } catch {
+    // Best-effort cleanup only. Docker has already read the file.
+  }
+}
+
+function cleanupLegacyRuntimeEnv() {
+  rmSync(resolve(root, '.docker', 'rewind.env'), { force: true });
+}
+
+function cleanupLegacyComposeProject(env) {
+  const inspect = spawnSync('docker', ['inspect', 'rewind-app', '--format', '{{ index .Config.Labels "com.docker.compose.project" }}'], {
+    cwd: root,
+    env,
+    encoding: 'utf8'
+  });
+  if (inspect.status !== 0 || inspect.stdout.trim() !== 'rewind') return;
+  run('docker', ['compose', '-p', 'rewind', 'down'], env);
 }
 
 function ensureBackendEnv() {
   const envPath = resolve(root, '.env.backend');
   if (existsSync(envPath)) return;
-  const legacyPath = resolve(root, '.env');
-  if (existsSync(legacyPath)) {
-    copyFileSync(legacyPath, envPath);
-    console.log('Created .env.backend from existing .env.');
-    return;
-  }
   const examplePath = resolve(root, '.env.backend.example');
   if (!existsSync(examplePath)) {
     fail('Missing .env.backend and .env.backend.example. Create .env.backend before starting Docker.');
@@ -275,19 +293,20 @@ function printHelp() {
   npm run docker:run -- [options]
 
 Common commands:
-  npm run docker:backend       Remote Supabase + backend
+  npm run docker:backend       Local Supabase + backend
   npm run docker:local         Local Supabase + backend
-  npm run docker:json          Local JSON persistence + backend
+  npm run docker:remote        Remote Supabase + backend
   npm run web                  Phone web app on a separate local port
 
 Options:
-  --data remote|local|json     Data target. Default: remote.
+  --data local|remote          Data target. Default: local.
   --port 8787                  Host port. Container always listens on 8787.
   --reset-db                   Reset local Supabase only when it was not already running.
   --no-open                    Do not open a browser.
 
-The Docker runner uses .env.backend as the source of truth on every start and
-always disables phone page hosting inside the container. It recreates only the
-Rewind backend container so updated env values are applied. It does not stop or
-restart already-running local Supabase.`);
+The Docker runner reloads .env.backend on every start, writes a temporary
+Compose env file, then injects either local Supabase or remote Supabase
+credentials. It recreates only the Rewind backend container so updated env
+values are applied. The temporary env file is removed after Docker reads it. It
+does not stop or restart already-running local Supabase.`);
 }

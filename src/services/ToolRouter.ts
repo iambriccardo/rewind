@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { config } from '../config.js';
-import type { JsonObject, RewindSearchContext, ToolCall } from '../types.js';
-import { DeviceCommandBus } from './DeviceCommandBus.js';
+import type { JsonObject, RewindFrame, RewindProtocolResult, RewindSearchResults, RewindSaveRequest, ToolCall } from '../types.js';
 import { EmbeddingService } from './EmbeddingService.js';
 import type { RewindRepository } from './RewindRepository.js';
 import { SupervisionLogger } from './SupervisionLogger.js';
@@ -46,16 +45,10 @@ const SearchRewindsSchema = z.object({
   context: SearchContextSchema
 });
 
-const ShowRewindSchema = z.object({
-  event_id: z.uuid(),
-  answer_text: z.string().max(2000).optional()
-});
-
 export class ToolRouter {
   constructor(
     private readonly repository: RewindRepository,
     private readonly embeddings: EmbeddingService,
-    private readonly deviceBus: DeviceCommandBus,
     private readonly logger: SupervisionLogger
   ) {}
 
@@ -96,11 +89,13 @@ export class ToolRouter {
         return this.createRewind(input);
       case 'search_rewinds':
         return this.searchRewinds(input);
-      case 'show_rewind':
-        return this.showRewind(input);
       default:
         throw new Error(`Unknown tool: ${(input.toolCall as ToolCall).name}`);
     }
+  }
+
+  async search(input: { user_id: string; args: JsonObject }): Promise<RewindSearchResults> {
+    return this.buildSearchResults(input.user_id, input.args);
   }
 
   private async createRewind(input: { session_id: string; user_id: string; device_id: string; toolCall: ToolCall }): Promise<JsonObject> {
@@ -127,32 +122,31 @@ export class ToolRouter {
       }
     });
 
-    const { command } = await this.deviceBus.send({
-      session_id: input.session_id,
-      user_id: input.user_id,
-      device_id: input.device_id,
-      command_type: 'device.capture_rewind',
-      waitForAck: false,
-      payload: {
-        event_id: event.id,
-        rewind_duration_seconds: rewindDurationSeconds,
-        title: event.title,
-        frame_embedding_mode: config.EMBEDDING_MODE,
-        include_frame_images: config.EMBEDDING_MODE === 'text_and_image'
-      }
-    });
-
+    const saveRequest: RewindSaveRequest = {
+      request_id: input.toolCall.id,
+      event_id: event.id,
+      upload_url: `/v1/rewinds/${event.id}/commit`,
+      title: event.title,
+      description: event.description,
+      rewind_duration_seconds: rewindDurationSeconds,
+      frame_embedding_mode: config.EMBEDDING_MODE,
+      include_frame_images: config.EMBEDDING_MODE === 'text_and_image'
+    };
     return {
       event: compactEvent(event, rewindDurationSeconds),
-      device_command: compactCommand(command)
+      save_request: saveRequest
     };
   }
 
   private async searchRewinds(input: { session_id: string; user_id: string; device_id: string; toolCall: ToolCall }): Promise<JsonObject> {
-    const args = SearchRewindsSchema.parse(input.toolCall.args);
+    return this.buildSearchResults(input.user_id, input.toolCall.args) as unknown as JsonObject;
+  }
+
+  private async buildSearchResults(userId: string, rawArgs: JsonObject): Promise<RewindSearchResults> {
+    const args = SearchRewindsSchema.parse(rawArgs);
     const queryEmbedding = await this.embeddings.embedQuery(args.query);
     const results = await this.repository.searchRewinds({
-      user_id: input.user_id,
+      user_id: userId,
       query: args.query,
       query_embedding: queryEmbedding,
       context: {
@@ -163,71 +157,39 @@ export class ToolRouter {
       },
       limit: args.limit
     });
-    return {
+    const protocolResults = await Promise.all(
+      results.map(async (result): Promise<RewindProtocolResult> => {
+        const details = await this.repository.getRewindDetails({ user_id: userId, event_id: result.id });
+        const frames = result.frames?.length ? result.frames : details?.frames ?? [];
+        return {
+          event_id: result.id,
+          title: result.title,
+          description: result.description,
+          entities: result.entities,
+          location_hint: result.location_hint,
+          started_at: result.started_at,
+          ended_at: result.ended_at,
+          score: {
+            similarity: result.similarity,
+            event_similarity: result.event_similarity,
+            frame_similarity: result.frame_similarity,
+            text_rank: result.text_rank
+          },
+          frame_refs: frames.map(frameRef)
+        };
+      })
+    );
+
+    const searchResults: RewindSearchResults = {
       query: args.query,
       filters: {
         time_range: args.time_range ?? args.context?.time_range,
         entities: args.entities ?? args.context?.entities,
         location_hint: args.location_hint ?? args.context?.location_hint
       },
-      results: results.map((result) => ({
-        id: result.id,
-        title: result.title,
-        description: result.description,
-        entities: result.entities,
-        location_hint: result.location_hint,
-        started_at: result.started_at,
-        ended_at: result.ended_at,
-        similarity: result.similarity,
-        event_similarity: result.event_similarity,
-        frame_similarity: result.frame_similarity,
-        text_rank: result.text_rank,
-        frame_count: result.frames?.length
-      }))
+      results: protocolResults
     };
-  }
-
-  private async showRewind(input: { session_id: string; user_id: string; device_id: string; toolCall: ToolCall }): Promise<JsonObject> {
-    const args = ShowRewindSchema.parse(input.toolCall.args);
-    const details = await this.repository.getRewindDetails({ user_id: input.user_id, event_id: args.event_id });
-    if (!details) throw new Error(`Rewind not found: ${args.event_id}`);
-
-    const frameRefs = details.frames.map((frame) => ({
-      frame_id: frame.id,
-      device_frame_uuid: frame.device_frame_uuid,
-      captured_at: frame.captured_at,
-      offset_ms: frame.offset_ms,
-      caption: frame.caption
-    }));
-
-    const { command } = await this.deviceBus.send({
-      session_id: input.session_id,
-      user_id: input.user_id,
-      device_id: details.event.device_id,
-      command_type: 'device.show_rewind',
-      waitForAck: false,
-      payload: {
-        event_id: details.event.id,
-        title: details.event.title,
-        answer_text: args.answer_text,
-        frame_refs: frameRefs,
-        display: {
-          local_asset_id: details.event.local_asset_id,
-          thumbnail_frame_uuid: details.event.thumbnail_frame_uuid,
-          location_hint: details.event.location_hint
-        }
-      }
-    });
-
-    return {
-      event: {
-        id: details.event.id,
-        title: details.event.title,
-        description: details.event.description
-      },
-      frames: frameRefs,
-      device_command: compactCommand(command)
-    };
+    return searchResults;
   }
 }
 
@@ -243,10 +205,11 @@ function compactEvent(event: { id: string; status: string; title: string; descri
   };
 }
 
-function compactCommand(command: { id: string; command_type: string; status: string }) {
+function frameRef(frame: RewindFrame) {
   return {
-    id: command.id,
-    command_type: command.command_type,
-    status: command.status
+    frame_id: frame.id,
+    device_frame_uuid: frame.device_frame_uuid,
+    captured_at: frame.captured_at,
+    offset_ms: frame.offset_ms
   };
 }

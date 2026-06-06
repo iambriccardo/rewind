@@ -1,3 +1,5 @@
+name: rewind-backend
+
 services:
   rewind:
     build:
@@ -8,13 +10,10 @@ services:
     ports:
       - "${REWIND_PORT:-8787}:8787"
     env_file:
-      - .docker/rewind.env
+      - ${REWIND_BACKEND_ENV_FILE:-.env.backend}
     environment:
       HOST: 0.0.0.0
       PORT: 8787
-      LOCAL_DATA_PATH: /app/.data/rewind.json
-    volumes:
-      - rewind-data:/app/.data
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -24,6 +23,3 @@ services:
       interval: 10s
       timeout: 3s
       retries: 12
-
-volumes:
-  rewind-data:

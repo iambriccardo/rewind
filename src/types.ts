@@ -43,7 +43,6 @@ export type RewindFrame = {
   order_index: number;
   captured_at?: string | null;
   offset_ms?: number | null;
-  caption?: string | null;
   embedding?: number[] | string | null;
   metadata: JsonObject;
   created_at: string;
@@ -70,61 +69,85 @@ export type RewindSearchResult = RewindEvent & {
 
 export type ToolCall = {
   id: string;
-  name: 'create_rewind' | 'search_rewinds' | 'show_rewind';
+  name: 'create_rewind' | 'search_rewinds';
   args: JsonObject;
 };
 
-export type DeviceCommand = {
-  id: string;
-  session_id: string;
-  user_id: string;
-  device_id: string;
-  command_type: 'device.capture_rewind' | 'device.show_rewind' | string;
-  payload: JsonObject;
-  status: 'pending' | 'sent' | 'acknowledged' | 'failed' | 'timed_out';
-  ack_payload?: JsonObject | null;
-  error?: string | null;
-  created_at: string;
-  acknowledged_at?: string | null;
+export type RewindCommitRequest = {
+  event_id: string;
+  local_asset_id?: string;
+  thumbnail_frame_uuid?: string;
+  started_at?: string;
+  ended_at?: string;
+  location?: { latitude?: number; longitude?: number; location_hint?: string };
+  frames: Array<{
+    device_frame_uuid: string;
+    local_asset_id?: string;
+    captured_at?: string;
+    offset_ms?: number;
+    image_base64?: string;
+    mime_type?: string;
+    embedding?: number[];
+    metadata?: JsonObject;
+  }>;
+  metadata?: JsonObject;
 };
 
 export type ClientMessage =
   | { type: 'user.text'; text: string }
-  | { type: 'user.turn'; state: 'start' | 'end' }
   | { type: 'user.media'; modality: 'audio' | 'video' | 'image'; mime_type: string; data: string; seq?: number; timestamp?: string }
-  | { type: 'user.media_end'; modality: 'audio' | 'video' | 'image' }
-  | { type: 'device.command_ack'; command_id: string; status: 'ok' | 'error'; payload?: JsonObject; error?: string }
-  | { type: 'device.frame_observation'; frame_uuid: string; captured_at: string; caption?: string; metadata?: JsonObject }
-  | {
-      type: 'rewind.commit';
-      event_id: string;
-      local_asset_id?: string;
-      thumbnail_frame_uuid?: string;
-      started_at?: string;
-      ended_at?: string;
-      location?: { latitude?: number; longitude?: number; location_hint?: string };
-      frames: Array<{
-        device_frame_uuid: string;
-        local_asset_id?: string;
-        captured_at?: string;
-        offset_ms?: number;
-        caption?: string;
-        image_base64?: string;
-        mime_type?: string;
-        embedding?: number[];
-        metadata?: JsonObject;
-      }>;
-      metadata?: JsonObject;
-    };
+  | { type: 'user.media_end'; modality: 'audio' | 'video' | 'image' };
+
+export type RewindFrameRef = {
+  frame_id?: string;
+  device_frame_uuid: string;
+  captured_at?: string | null;
+  offset_ms?: number | null;
+};
+
+export type RewindProtocolResult = {
+  event_id: string;
+  title: string;
+  description: string;
+  entities: string[];
+  location_hint?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  score: {
+    similarity?: number | null;
+    event_similarity?: number | null;
+    frame_similarity?: number | null;
+    text_rank?: number | null;
+  };
+  frame_refs: RewindFrameRef[];
+};
+
+export type RewindSaveRequest = {
+  request_id: string;
+  event_id: string;
+  upload_url: string;
+  title: string;
+  description: string;
+  rewind_duration_seconds: number;
+  include_frame_images: boolean;
+  frame_embedding_mode: 'text_only' | 'text_and_image' | string;
+};
+
+export type RewindSearchResults = {
+  query: string;
+  filters?: {
+    time_range?: RewindSearchContext['time_range'];
+    entities?: string[];
+    location_hint?: string;
+  };
+  results: RewindProtocolResult[];
+};
 
 export type ServerMessage =
   | { type: 'session.ready'; session_id: string; user_id: string; device_id: string }
   | { type: 'agent.message'; text: string; payload?: JsonObject }
   | { type: 'agent.live_state'; state: 'connecting' | 'transport_open' | 'connected' | 'closed' | 'error'; payload?: JsonObject }
   | { type: 'agent.media'; modality: 'audio' | 'text'; mime_type?: string; data?: string; text?: string; seq?: number }
-  | { type: 'agent.tool_call'; tool_call: ToolCall }
-  | { type: 'agent.tool_result'; tool_call_id: string; tool_name: string; result: JsonObject }
-  | { type: 'device.command'; command: DeviceCommand }
-  | { type: 'rewind.committed'; event: RewindEvent; frames: RewindFrame[] }
-  | { type: 'search.results'; results: RewindSearchResult[] }
+  | ({ type: 'rewind.save_request' } & RewindSaveRequest)
+  | ({ type: 'rewind.search_results' } & RewindSearchResults)
   | { type: 'error'; error: string; details?: unknown };

@@ -36,7 +36,6 @@ create table public.rewind_frames (
   order_index integer not null constraint rewind_frames_order_index_check check (order_index >= 0),
   captured_at timestamptz,
   offset_ms integer constraint rewind_frames_offset_ms_check check (offset_ms is null or offset_ms >= 0),
-  caption text,
   embedding extensions.vector(768),
   metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
@@ -163,10 +162,12 @@ stable
 as $$
 declare
   v_limit integer := greatest(1, least(coalesce(p_limit, 10), 50));
-  v_candidate_limit integer := greatest(50, least(greatest(1, coalesce(p_limit, 10)) * 20, 400));
+  v_candidate_limit integer := greatest(100, least(greatest(1, coalesce(p_limit, 10)) * 40, 1000));
 begin
   perform set_config('hnsw.ef_search', '100', true);
   perform set_config('hnsw.iterative_scan', 'strict_order', true);
+  perform set_config('hnsw.max_scan_tuples', '50000', true);
+  perform set_config('hnsw.scan_mem_multiplier', '2', true);
 
   return query
   with query_terms as (
@@ -176,7 +177,19 @@ begin
       case
         when nullif(trim(coalesce(p_query_text, '')), '') is null then null
         else websearch_to_tsquery('simple', p_query_text)
-      end as ts_query
+      end as ts_query,
+      case
+        when nullif(trim(coalesce(p_query_text, '')), '') is null then null
+        else (
+          select to_tsquery('simple', string_agg(token || ':*', ' | '))
+          from (
+            select regexp_replace(raw_token, '[^a-z0-9]', '', 'g') as token
+            from regexp_split_to_table(lower(p_query_text), '\s+') raw_token
+          ) tokens
+          where length(token) > 2
+            and token not in ('where', 'what', 'when', 'with', 'this', 'that', 'there', 'have', 'about', 'left', 'leave', 'leaving', 'put', 'did', 'are', 'the', 'and', 'you', 'for', 'from')
+        )
+      end as token_query
   ),
   event_vector_candidates as (
     select
@@ -225,33 +238,40 @@ begin
     ) ranked
     group by ranked.rewind_event_id
   ),
-  text_candidates as (
-    select
-      e.id,
-      ts_rank_cd(e.search_tsv, q.ts_query)::double precision as text_rank
-    from public.rewind_events e
-    cross join query_terms q
-    where q.ts_query is not null
-      and e.user_id = p_user_id
-      and case
-        when p_statuses is null or array_length(p_statuses, 1) is null then e.status in ('committed', 'pending')
-        else e.status = any(p_statuses)
-      end
-      and e.search_tsv @@ q.ts_query
-      and (p_entities is null or array_length(p_entities, 1) is null or e.entities && p_entities)
-      and (q.location_text is null or e.location_hint ilike '%' || q.location_text || '%')
-      and (p_started_after is null or coalesce(e.ended_at, e.started_at, e.created_at) >= p_started_after)
-      and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) <= p_ended_before)
-    order by ts_rank_cd(e.search_tsv, q.ts_query) desc
-    limit v_candidate_limit
-  ),
+	  text_candidates as (
+	    select
+	      e.id,
+	      greatest(
+	        coalesce(case when q.ts_query is not null and e.search_tsv @@ q.ts_query then ts_rank_cd(e.search_tsv, q.ts_query) end, 0),
+	        coalesce(case when q.token_query is not null and e.search_tsv @@ q.token_query then ts_rank_cd(e.search_tsv, q.token_query) end, 0)
+	      )::double precision as text_rank
+	    from public.rewind_events e
+	    cross join query_terms q
+	    where (q.ts_query is not null or q.token_query is not null)
+	      and e.user_id = p_user_id
+	      and case
+	        when p_statuses is null or array_length(p_statuses, 1) is null then e.status in ('committed', 'pending')
+	        else e.status = any(p_statuses)
+	      end
+	      and (
+	        (q.ts_query is not null and e.search_tsv @@ q.ts_query)
+	        or (q.token_query is not null and e.search_tsv @@ q.token_query)
+	      )
+	      and (p_entities is null or array_length(p_entities, 1) is null or e.entities && p_entities)
+	      and (q.location_text is null or e.location_hint ilike '%' || q.location_text || '%')
+	      and (p_started_after is null or coalesce(e.ended_at, e.started_at, e.created_at) >= p_started_after)
+	      and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) <= p_ended_before)
+	    order by text_rank desc
+	    limit v_candidate_limit
+	  ),
   recent_candidates as (
     select e.id
     from public.rewind_events e
     cross join query_terms q
-    where p_query_embedding is null
-      and q.ts_query is null
-      and e.user_id = p_user_id
+	    where p_query_embedding is null
+	      and q.ts_query is null
+	      and q.token_query is null
+	      and e.user_id = p_user_id
       and case
         when p_statuses is null or array_length(p_statuses, 1) is null then e.status in ('committed', 'pending')
         else e.status = any(p_statuses)
@@ -272,20 +292,42 @@ begin
     union
     select rc.id from recent_candidates rc
   ),
-  scores as (
-    select
-      c.id,
-      ev.event_similarity,
-      fv.frame_similarity,
-      tc.text_rank,
-      greatest(coalesce(ev.event_similarity, -1), coalesce(fv.frame_similarity, -1))::double precision as vector_similarity
-    from candidate_ids c
-    left join event_vector_candidates ev on ev.id = c.id
-    left join frame_vector_candidates fv on fv.id = c.id
-    left join text_candidates tc on tc.id = c.id
-  )
-  select
-    e.id,
+	  scores as (
+	    select
+	      c.id,
+	      ev.event_similarity,
+	      fv.frame_similarity,
+	      tc.text_rank,
+	      greatest(coalesce(ev.event_similarity, -1), coalesce(fv.frame_similarity, -1))::double precision as display_similarity,
+	      case
+	        when ev.event_similarity is not null and fv.frame_similarity is not null then
+	          (greatest(ev.event_similarity, 0) * 0.82 + greatest(fv.frame_similarity, 0) * 0.18)
+	        when ev.event_similarity is not null then greatest(ev.event_similarity, 0)
+	        when fv.frame_similarity is not null then greatest(fv.frame_similarity, 0) * 0.78
+	        else 0
+	      end::double precision as semantic_score
+	    from candidate_ids c
+	    left join event_vector_candidates ev on ev.id = c.id
+	    left join frame_vector_candidates fv on fv.id = c.id
+	    left join text_candidates tc on tc.id = c.id
+	  ),
+	  ranked_scores as (
+	    select
+	      s.*,
+	      (
+	        s.semantic_score * 0.76 +
+	        least(coalesce(s.text_rank, 0) / 2.4, 1) * 0.24
+	      )::double precision as relevance_score,
+	      floor(
+	        (
+	          s.semantic_score * 0.76 +
+	          least(coalesce(s.text_rank, 0) / 2.4, 1) * 0.24
+	        ) * 40
+	      )::integer as relevance_bucket
+	    from scores s
+	  )
+	  select
+	    e.id,
     e.user_id,
     e.device_id,
     e.status,
@@ -303,15 +345,16 @@ begin
     e.metadata,
     e.created_at,
     e.updated_at,
-    case when s.vector_similarity < 0 then null else s.vector_similarity end as similarity,
+    case when s.display_similarity < 0 then null else s.display_similarity end as similarity,
     s.event_similarity,
-    s.frame_similarity,
-    coalesce(s.text_rank, 0)::double precision as text_rank
-  from scores s
-  join public.rewind_events e on e.id = s.id
-  order by
-    (greatest(coalesce(s.vector_similarity, 0), 0) * 0.70 + coalesce(s.text_rank, 0) * 0.30) desc,
-    e.created_at desc
-  limit v_limit;
+	    s.frame_similarity,
+	    coalesce(s.text_rank, 0)::double precision as text_rank
+	  from ranked_scores s
+	  join public.rewind_events e on e.id = s.id
+	  order by
+	    s.relevance_bucket desc,
+	    e.created_at desc,
+	    s.relevance_score desc
+	  limit v_limit;
 end;
 $$;

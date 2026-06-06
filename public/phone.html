@@ -48,8 +48,7 @@
         text-align: center;
         padding: 24px;
       }
-      .toolbar,
-      .composer {
+      .toolbar {
         display: flex;
         gap: 8px;
         margin-top: 12px;
@@ -81,6 +80,11 @@
         padding: 0 12px;
         cursor: pointer;
       }
+      button:disabled,
+      input:disabled {
+        cursor: not-allowed;
+        opacity: 0.48;
+      }
       .setting {
         display: inline-flex;
         align-items: center;
@@ -107,9 +111,36 @@
         border-radius: 6px;
         font-size: 13px;
       }
+      .status[data-state="offline"] {
+        border-color: #9b5555;
+        color: #ffc9c9;
+        background: #1f1212;
+      }
+      .status[data-state="checking"] {
+        border-color: #9b8d51;
+        color: #f0dfa6;
+      }
+      .status[data-state="ready"],
+      .status[data-state="streaming"] {
+        border-color: #3d9e72;
+        color: #c9f5dc;
+      }
+      .search-panel {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .search-panel input {
+        width: 100%;
+        min-width: 0;
+      }
       .log,
       .tools,
-      .timeline {
+      .playback,
+      .summary,
+      .results,
+      .dev-protocol {
         border: 1px solid #2b3733;
         background: #121916;
         padding: 10px;
@@ -126,29 +157,153 @@
         height: 26vh;
         margin-bottom: 12px;
       }
-      .timeline {
+      .summary {
+        min-height: 56px;
+        margin-bottom: 12px;
+      }
+      .summary strong,
+      .memory-card strong {
+        display: block;
+        margin-bottom: 4px;
+      }
+      .summary small,
+      .memory-card small,
+      .empty {
+        color: #9aaca4;
+      }
+      .summary[data-tone="ok"] {
+        border-color: #3d9e72;
+      }
+      .summary[data-tone="busy"] {
+        border-color: #9b8d51;
+      }
+      .summary[data-tone="error"] {
+        border-color: #9b5555;
+      }
+      .results {
+        display: grid;
+        gap: 8px;
+        max-height: 28vh;
+        margin-bottom: 12px;
+      }
+      .memory-card {
+        border: 1px solid #2b3733;
+        background: #0d1210;
+        color: inherit;
+        text-align: left;
+        padding: 10px;
+        min-height: auto;
+        cursor: pointer;
+      }
+      .memory-card:hover,
+      .memory-card.active {
+        border-color: #3d9e72;
+      }
+      .memory-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 8px;
+      }
+      .pill {
+        border: 1px solid #34433e;
+        color: #c8d7d0;
+        padding: 2px 6px;
+        font-size: 12px;
+      }
+      .playback {
         margin-top: 12px;
+        min-height: 240px;
+      }
+      .player {
+        position: relative;
+        overflow: hidden;
+        background: #050706;
+        border: 1px solid #2b3733;
+        aspect-ratio: 4 / 3;
+        display: grid;
+        place-items: center;
+      }
+      .player img {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        opacity: 0;
+        transition: opacity 180ms ease;
+      }
+      .player img.visible {
+        opacity: 1;
+      }
+      .player .empty {
+        padding: 18px;
+        text-align: center;
+      }
+      .playback-info {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px 2px 0;
+        color: #c8d7d0;
+        font-size: 13px;
+      }
+      .playback-info strong {
+        display: block;
+        color: #eef3ef;
+      }
+      .frame-list {
+        margin-top: 10px;
         min-height: 180px;
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
-        gap: 8px;
+        grid-template-columns: 1fr;
+        gap: 6px;
+        max-height: 34vh;
+        overflow: auto;
       }
-      .thumb {
+      .frame-row {
         border: 1px solid #2b3733;
         background: #0a0d0c;
-        min-height: 72px;
+        display: grid;
+        grid-template-columns: 72px minmax(0, 1fr);
+        gap: 8px;
+        padding: 6px;
+        color: inherit;
+        text-align: left;
+        min-height: 64px;
+        cursor: pointer;
       }
-      .thumb img {
+      .frame-row.active {
+        border-color: #3d9e72;
+        background: #102018;
+      }
+      .frame-row img {
         width: 100%;
-        aspect-ratio: 4 / 3;
+        height: 54px;
         object-fit: cover;
         display: block;
       }
-      .thumb small {
+      .frame-row small {
         display: block;
-        padding: 4px;
         color: #a9bbb2;
         overflow-wrap: anywhere;
+      }
+      .frame-time {
+        color: #6f8279;
+        font-size: 12px;
+        margin-top: 4px;
+      }
+      .dev-protocol {
+        margin-top: 12px;
+      }
+      .dev-protocol summary {
+        cursor: pointer;
+        color: #c8d7d0;
+      }
+      .dev-protocol .tools,
+      .dev-protocol .log {
+        margin-top: 10px;
       }
       h1 {
         font-size: 18px;
@@ -164,6 +319,9 @@
         .log {
           height: 28vh;
         }
+        .search-panel {
+          grid-template-columns: 1fr;
+        }
       }
     </style>
   </head>
@@ -175,7 +333,7 @@
           <video id="video" autoplay playsinline muted></video>
         <div id="placeholder" class="placeholder">Start streaming to share camera and microphone.</div>
         </div>
-        <div id="status" class="status">Disconnected</div>
+        <div id="status" class="status" data-state="checking">Checking backend...</div>
         <div class="toolbar">
           <button id="stream" class="primary">Start Streaming</button>
         </div>
@@ -188,21 +346,34 @@
             s
           </label>
         </div>
-        <div class="composer">
-          <input id="utterance" value="remember where I left this pen" />
-          <button id="send">Send</button>
-        </div>
-        <div class="composer">
-          <input id="search" value="where is my pen?" />
-          <button id="ask">Ask</button>
-        </div>
       </section>
       <aside>
-        <h1>Tool JSON</h1>
-        <div id="tools" class="tools"></div>
-        <h1>Events</h1>
-        <div id="log" class="log"></div>
-        <div id="timeline" class="timeline"></div>
+        <h1>Rewind</h1>
+        <div id="summary" class="summary">
+          <strong>Ready</strong>
+          <small>Waiting for a save or search request.</small>
+        </div>
+        <form id="searchForm" class="search-panel">
+          <input id="searchInput" type="search" autocomplete="off" placeholder="Search memories" />
+          <button id="searchButton" type="submit">Search</button>
+        </form>
+        <h1>Results</h1>
+        <div id="results" class="results">
+          <div class="empty">No memories yet.</div>
+        </div>
+        <h1>Playback</h1>
+        <div id="playback" class="playback">
+          <div id="player" class="player">
+            <div class="empty">Search results will play here.</div>
+          </div>
+          <div id="playbackInfo" class="playback-info"></div>
+          <div id="frameList" class="frame-list"></div>
+        </div>
+        <details id="devDetails" class="dev-protocol">
+          <summary>Dev protocol JSON</summary>
+          <div id="tools" class="tools"></div>
+          <div id="log" class="log"></div>
+        </details>
       </aside>
     </main>
     <canvas id="canvas" width="640" height="480" hidden></canvas>
@@ -218,6 +389,8 @@
       const AUDIO_SAMPLE_RATE = 16000;
       const AUDIO_CHUNK_MS = 250;
       const AUDIO_CHUNK_SAMPLE_COUNT = Math.round((AUDIO_SAMPLE_RATE * AUDIO_CHUNK_MS) / 1000);
+      const BACKEND_HEALTH_INTERVAL_MS = 2500;
+      const PLAYBACK_INTERVAL_MS = 450;
       const DEFAULT_BACKEND_URL = 'http://localhost:8787';
       const webConfig = window.REWIND_WEB_CONFIG || {};
 
@@ -237,7 +410,14 @@
         frameStoreErrorLogged: false,
         videoHidden: false,
         audioMuted: false,
-        frameIntervalSeconds: readFrameIntervalSeconds()
+        frameIntervalSeconds: readFrameIntervalSeconds(),
+        backendReady: false,
+        backendChecking: false,
+        searchBusy: false,
+        playbackFrames: [],
+        playbackIndex: 0,
+        playbackTimer: null,
+        activePlaybackMemory: null
       };
 
       const els = {
@@ -249,30 +429,127 @@
         hideVideo: document.getElementById('hideVideo'),
         muteAudio: document.getElementById('muteAudio'),
         frameInterval: document.getElementById('frameInterval'),
-        utterance: document.getElementById('utterance'),
-        search: document.getElementById('search'),
-        send: document.getElementById('send'),
-        ask: document.getElementById('ask'),
+        searchForm: document.getElementById('searchForm'),
+        searchInput: document.getElementById('searchInput'),
+        searchButton: document.getElementById('searchButton'),
         status: document.getElementById('status'),
+        summary: document.getElementById('summary'),
+        results: document.getElementById('results'),
+        devDetails: document.getElementById('devDetails'),
         log: document.getElementById('log'),
         tools: document.getElementById('tools'),
-        timeline: document.getElementById('timeline')
+        player: document.getElementById('player'),
+        playbackInfo: document.getElementById('playbackInfo'),
+        frameList: document.getElementById('frameList')
       };
 
       els.frameInterval.value = String(state.frameIntervalSeconds);
+      els.stream.disabled = true;
+      els.stream.textContent = 'Backend unavailable';
 
       function log(message, payload) {
         const line = `[${new Date().toLocaleTimeString()}] ${message}${payload ? `\n${JSON.stringify(payload, null, 2)}` : ''}\n`;
         els.log.textContent = line + els.log.textContent;
       }
 
-      function toolLog(kind, payload) {
+      function protocolLog(kind, payload) {
         const line = `[${new Date().toLocaleTimeString()}] ${kind}\n${JSON.stringify(payload, null, 2)}\n\n`;
         els.tools.textContent = line + els.tools.textContent;
       }
 
-      function setStatus(message) {
+      function setStatus(message, stateName = '') {
         els.status.textContent = message;
+        if (stateName) els.status.dataset.state = stateName;
+      }
+
+      function setSummary(title, detail = '', tone = '') {
+        els.summary.dataset.tone = tone;
+        els.summary.innerHTML = '';
+        const strong = document.createElement('strong');
+        strong.textContent = title;
+        els.summary.appendChild(strong);
+        if (detail) {
+          const small = document.createElement('small');
+          small.textContent = detail;
+          els.summary.appendChild(small);
+        }
+      }
+
+      function renderSavedMemory(request, frameCount, status) {
+        els.results.innerHTML = '';
+        const card = memoryCard({
+          title: request.title,
+          description: request.description,
+          meta: [
+            `${frameCount} frames`,
+            `${request.rewind_duration_seconds || 0}s`,
+            status
+          ]
+        });
+        els.results.appendChild(card);
+      }
+
+      function renderSearchResults(message) {
+        els.results.innerHTML = '';
+        if (!message.results.length) {
+          const empty = document.createElement('div');
+          empty.className = 'empty';
+          empty.textContent = `No memories found for "${message.query}".`;
+          els.results.appendChild(empty);
+          renderTimeline([]);
+          return;
+        }
+
+        message.results.forEach((result, index) => {
+          const score = result.score?.similarity ?? result.score?.text_rank;
+          const meta = [
+            `${result.frame_refs?.length || 0} frames`,
+            score == null ? null : `score ${Number(score).toFixed(2)}`,
+            result.location_hint || null
+          ].filter(Boolean);
+          const card = memoryCard({
+            title: result.title,
+            description: result.description,
+            meta,
+            active: index === 0,
+            onClick: () => {
+              for (const item of els.results.querySelectorAll('.memory-card')) item.classList.remove('active');
+              card.classList.add('active');
+              renderTimeline(result.frame_refs || []);
+              setSummary(result.title, result.description, 'ok');
+            }
+          });
+          els.results.appendChild(card);
+        });
+        renderTimeline(message.results[0]?.frame_refs || []);
+      }
+
+      function memoryCard({ title, description, meta = [], active = false, onClick }) {
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = `memory-card${active ? ' active' : ''}`;
+        if (onClick) card.onclick = onClick;
+
+        const strong = document.createElement('strong');
+        strong.textContent = title || 'Untitled rewind';
+        card.appendChild(strong);
+
+        const small = document.createElement('small');
+        small.textContent = description || '';
+        card.appendChild(small);
+
+        if (meta.length) {
+          const row = document.createElement('div');
+          row.className = 'memory-meta';
+          for (const value of meta) {
+            const pill = document.createElement('span');
+            pill.className = 'pill';
+            pill.textContent = value;
+            row.appendChild(pill);
+          }
+          card.appendChild(row);
+        }
+        return card;
       }
 
       function clampFrameIntervalSeconds(value) {
@@ -348,7 +625,60 @@
         return `${proto}//${backendUrl.host}/v1/live?${params}`;
       }
 
+      function backendHttpUrl(path) {
+        return new URL(path, webConfig.BACKEND_URL || DEFAULT_BACKEND_URL).toString();
+      }
+
+      function setBackendAvailability(ready, detail = '') {
+        state.backendReady = ready;
+        if (!ready) {
+          if (state.streaming) forceStopStreaming('Backend disconnected.');
+          if (state.ws && state.ws.readyState === WebSocket.OPEN) state.ws.close();
+          setStatus(detail || 'Backend unavailable. Start the backend before streaming.', 'offline');
+        } else if (!state.streaming && (!state.ws || state.ws.readyState !== WebSocket.OPEN)) {
+          setStatus(detail || 'Backend ready. Streaming can start.', 'ready');
+        }
+        updateStreamingControls();
+      }
+
+      function updateStreamingControls() {
+        const canUseStream = state.backendReady && !state.backendChecking;
+        els.stream.disabled = !canUseStream;
+        if (!canUseStream) {
+          els.stream.textContent = state.backendChecking ? 'Checking Backend' : 'Backend unavailable';
+        } else {
+          els.stream.textContent = state.streaming ? 'Stop Streaming' : 'Start Streaming';
+        }
+        const controlsDisabled = !canUseStream || !state.streaming;
+        els.hideVideo.disabled = controlsDisabled;
+        els.muteAudio.disabled = controlsDisabled;
+        els.frameInterval.disabled = !canUseStream;
+        els.searchInput.disabled = !canUseStream || state.searchBusy;
+        els.searchButton.disabled = !canUseStream || state.searchBusy || !els.searchInput.value.trim();
+        els.searchButton.textContent = state.searchBusy ? 'Searching' : 'Search';
+      }
+
+      async function checkBackendHealth() {
+        if (state.backendChecking) return;
+        state.backendChecking = true;
+        updateStreamingControls();
+        try {
+          const response = await fetch(backendHttpUrl('/health'), { cache: 'no-store' });
+          if (!response.ok) throw new Error(`health ${response.status}`);
+          const health = await response.json();
+          setBackendAvailability(Boolean(health.ok), `Backend ready · ${health.storage?.repository || 'unknown storage'}`);
+        } catch (error) {
+          setBackendAvailability(false, `Backend disconnected · ${error.message || String(error)}`);
+        } finally {
+          state.backendChecking = false;
+          updateStreamingControls();
+        }
+      }
+
       function connect() {
+        if (!state.backendReady) {
+          throw new Error('Backend is not connected. Start the backend before streaming.');
+        }
         if (state.ws?.readyState === WebSocket.OPEN) return Promise.resolve();
         if (state.ws?.readyState === WebSocket.CONNECTING) {
           return new Promise((resolve, reject) => {
@@ -362,19 +692,29 @@
           state.ws.addEventListener('error', reject, { once: true });
         });
         state.ws.onopen = () => {
-          setStatus('Connected');
+          setStatus('Realtime connected', 'ready');
           log('WebSocket connected');
+          updateStreamingControls();
         };
         state.ws.onclose = () => {
-          setStatus('Disconnected');
+          if (state.streaming) forceStopStreaming('Realtime socket disconnected.');
+          setStatus(state.backendReady ? 'Realtime disconnected. Streaming can restart.' : 'Backend disconnected.', state.backendReady ? 'ready' : 'offline');
           log('WebSocket disconnected');
+          updateStreamingControls();
         };
-        state.ws.onerror = () => log('WebSocket error');
+        state.ws.onerror = () => {
+          log('WebSocket error');
+          checkBackendHealth();
+        };
         state.ws.onmessage = (event) => handleServerMessage(JSON.parse(event.data));
         return ready;
       }
 
       async function startStreaming() {
+        if (!state.backendReady) {
+          await checkBackendHealth();
+          if (!state.backendReady) throw new Error('Backend is not connected. Start the backend before streaming.');
+        }
         if (state.streaming) {
           stopStreaming();
           return;
@@ -412,13 +752,11 @@
         state.videoHidden = false;
         state.audioMuted = false;
         els.placeholder.style.display = 'none';
-        els.stream.textContent = 'Stop Streaming';
-        els.stream.disabled = false;
         els.streamControls.hidden = false;
         updateStreamControls();
-        setStatus('Streaming camera and microphone');
-        captureFrame('local buffer');
-        send({ type: 'user.turn', state: 'start' });
+        updateStreamingControls();
+        setStatus('Streaming camera and microphone', 'streaming');
+        captureFrame();
         scheduleLocalCapture();
         sendFrameToAgent();
         scheduleFrameStreaming();
@@ -433,7 +771,6 @@
         if (stopAudioStreaming()) {
           send({ type: 'user.media_end', modality: 'audio' });
         }
-        send({ type: 'user.turn', state: 'end' });
         state.mediaStream?.getTracks().forEach((track) => track.stop());
         state.mediaStream = null;
         state.streaming = false;
@@ -442,10 +779,25 @@
         els.video.srcObject = null;
         els.video.style.visibility = 'visible';
         els.placeholder.style.display = 'grid';
-        els.stream.textContent = 'Start Streaming';
-        els.stream.disabled = false;
         els.streamControls.hidden = true;
-        setStatus('Streaming stopped');
+        updateStreamingControls();
+        setStatus(state.backendReady ? 'Streaming stopped. Backend ready.' : 'Backend disconnected.', state.backendReady ? 'ready' : 'offline');
+      }
+
+      function forceStopStreaming(reason) {
+        clearFrameTimers();
+        stopAudioStreaming();
+        state.mediaStream?.getTracks().forEach((track) => track.stop());
+        state.mediaStream = null;
+        state.streaming = false;
+        state.videoHidden = false;
+        state.audioMuted = false;
+        els.video.srcObject = null;
+        els.video.style.visibility = 'visible';
+        els.placeholder.style.display = 'grid';
+        els.placeholder.textContent = reason || 'Streaming stopped.';
+        els.streamControls.hidden = true;
+        updateStreamingControls();
       }
 
       function clearFrameTimers() {
@@ -462,7 +814,7 @@
       function scheduleLocalCapture() {
         if (state.localCaptureTimer) clearInterval(state.localCaptureTimer);
         state.localCaptureTimer = setInterval(() => {
-          if (state.streaming && !state.videoHidden) captureFrame('local buffer');
+          if (state.streaming && !state.videoHidden) captureFrame();
         }, LOCAL_FRAME_CAPTURE_INTERVAL_MS);
       }
 
@@ -471,7 +823,7 @@
         state.frameStreamTimer = setInterval(sendFrameToAgent, currentFrameIntervalMs());
       }
 
-      function captureFrame(caption = '') {
+      function captureFrame() {
         const ctx = els.canvas.getContext('2d');
         if (state.streaming && !state.videoHidden && els.video.videoWidth) {
           const scale = Math.min(1, MAX_FRAME_EDGE_PX / Math.max(els.video.videoWidth, els.video.videoHeight));
@@ -485,13 +837,12 @@
           ctx.font = '28px system-ui';
           ctx.fillText(new Date().toLocaleTimeString(), 24, 54);
           ctx.font = '18px system-ui';
-          ctx.fillText(caption || 'local fallback frame', 24, 92);
+          ctx.fillText('local frame', 24, 92);
         }
         const frame = {
           uuid: crypto.randomUUID(),
           capturedAt: new Date().toISOString(),
-          dataUrl: els.canvas.toDataURL('image/jpeg', FRAME_JPEG_QUALITY),
-          caption
+          dataUrl: els.canvas.toDataURL('image/jpeg', FRAME_JPEG_QUALITY)
         };
         state.buffer.push(frame);
         state.assets.set(frame.uuid, frame);
@@ -511,7 +862,6 @@
           body: JSON.stringify({
             device_frame_uuid: frame.uuid,
             captured_at: frame.capturedAt,
-            caption: frame.caption,
             mime_type: 'image/jpeg',
             data_url: frame.dataUrl
           })
@@ -540,7 +890,7 @@
 
       function sendFrameToAgent() {
         if (!state.streaming || state.videoHidden) return;
-        const frame = state.buffer.at(-1) || captureFrame('realtime observation');
+        const frame = state.buffer.at(-1) || captureFrame();
         const base64 = frame.dataUrl.split(',')[1];
         send({
           type: 'user.media',
@@ -651,7 +1001,7 @@
           }
           send({ type: 'user.media_end', modality: 'image' });
         } else {
-          captureFrame('local buffer');
+          captureFrame();
           sendFrameToAgent();
           scheduleFrameStreaming();
         }
@@ -687,19 +1037,14 @@
         if (message.type === 'session.ready') {
           state.sessionId = message.session_id;
           log('Session ready', message);
+          setSummary('Session ready', 'Realtime connection is active.', 'ok');
           return;
         }
-        if (message.type === 'device.command') {
-          log(`Command: ${message.command.command_type}`, message.command.payload);
-          await handleDeviceCommand(message.command);
-          return;
-        }
-        if (message.type === 'agent.tool_call') {
-          toolLog('tool_call', message.tool_call);
-          return;
-        }
-        if (message.type === 'agent.tool_result') {
-          toolLog('tool_result', message);
+        if (message.type === 'rewind.save_request') {
+          protocolLog('rewind.save_request', message);
+          setSummary('Saving rewind', `${message.title} · ${message.rewind_duration_seconds}s`, 'busy');
+          renderSavedMemory(message, 0, 'uploading');
+          void captureAndUploadRewind(message);
           return;
         }
         if (message.type === 'agent.media') {
@@ -711,111 +1056,247 @@
           });
           return;
         }
-        if (message.type === 'search.results') {
-          log('Search results', message.results);
+        if (message.type === 'rewind.search_results') {
+          protocolLog('rewind.search_results', message);
+          log('Search results', { query: message.query, results: message.results.length });
+          setSummary('Search complete', `${message.results.length} result${message.results.length === 1 ? '' : 's'} for "${message.query}".`, 'ok');
+          renderSearchResults(message);
           return;
         }
-        if (message.type === 'rewind.committed') {
-          log('Rewind committed', { event: message.event, frames: message.frames.length });
-          return;
+        if (message.type === 'error') {
+          setSummary('Protocol error', message.error, 'error');
         }
         log(message.type, message);
       }
 
-      async function handleDeviceCommand(command) {
-        if (command.command_type === 'device.capture_rewind') {
-          if (!state.buffer.length) {
-            captureFrame('captured on demand');
-          }
-          const durationSeconds = Number(command.payload.rewind_duration_seconds || 6);
+      async function captureAndUploadRewind(request) {
+        try {
+          if (!state.buffer.length) captureFrame();
+          const durationSeconds = Number(request.rewind_duration_seconds || 6);
           const frames = state.buffer.slice(-Math.max(1, Math.min(FRAME_BUFFER_SECONDS, durationSeconds)));
           await persistFrames(frames);
-          send({
-            type: 'device.command_ack',
-            command_id: command.id,
-            status: 'ok',
-            payload: { frame_count: frames.length, rewind_duration_seconds: durationSeconds }
-          });
-          send({
-            type: 'rewind.commit',
-            event_id: command.payload.event_id,
-            local_asset_id: `local-${command.payload.event_id}`,
+          renderSavedMemory(request, frames.length, 'uploading');
+          const upload = {
+            event_id: request.event_id,
+            local_asset_id: `local-${request.event_id}`,
             thumbnail_frame_uuid: frames.at(-1)?.uuid,
             started_at: frames[0]?.capturedAt,
             ended_at: frames.at(-1)?.capturedAt,
             frames: frames.map((frame, index) => {
-              const payload = {
-                device_frame_uuid: frame.uuid,
-                local_asset_id: `local-${command.payload.event_id}`,
-                captured_at: frame.capturedAt,
-                offset_ms: index * 1000,
-                caption: frame.caption || command.payload.title
-              };
-              if (command.payload.include_frame_images) {
+	              const payload = {
+	                device_frame_uuid: frame.uuid,
+	                local_asset_id: `local-${request.event_id}`,
+	                captured_at: frame.capturedAt,
+	                offset_ms: index * 1000
+	              };
+              if (request.include_frame_images) {
                 payload.image_base64 = frame.dataUrl.split(',')[1];
                 payload.mime_type = 'image/jpeg';
               }
               return payload;
             }),
             metadata: {
-              simulator: true,
               rewind_duration_seconds: durationSeconds,
-              frame_embedding_mode: command.payload.frame_embedding_mode || 'text_only'
+              frame_embedding_mode: request.frame_embedding_mode || 'text_only'
             }
+          };
+          const response = await fetch(backendHttpUrl(request.upload_url), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-user-id': webConfig.DEV_USER_ID || '00000000-0000-4000-8000-000000000001',
+              'x-device-id': webConfig.DEV_DEVICE_ID || 'dev-phone'
+            },
+            body: JSON.stringify(upload)
           });
-          return;
-        }
-
-        if (command.command_type === 'device.show_rewind') {
-          renderTimeline(command.payload.frame_refs || []);
-          send({
-            type: 'device.command_ack',
-            command_id: command.id,
-            status: 'ok',
-            payload: { displayed: true }
+          if (!response.ok) throw new Error(`Upload returned ${response.status}`);
+          const result = await response.json();
+          protocolLog('rewind.upload_complete', {
+            event_id: result.event?.id || request.event_id,
+            frame_count: result.frames?.length ?? frames.length
           });
-          return;
+          setSummary('Rewind saved', `${request.title} · ${result.frames?.length ?? frames.length} frames uploaded.`, 'ok');
+          renderSavedMemory(request, result.frames?.length ?? frames.length, 'saved');
+          renderTimeline(result.frames || upload.frames);
+          log('Rewind uploaded', { event_id: result.event?.id || request.event_id, frames: result.frames?.length ?? frames.length });
+        } catch (error) {
+          setSummary('Rewind upload failed', error.message || String(error), 'error');
+          renderSavedMemory(request, 0, 'failed');
+          protocolLog('rewind.upload_failed', {
+            event_id: request.event_id,
+            error: error.message || String(error)
+          });
         }
-
-        send({
-          type: 'device.command_ack',
-          command_id: command.id,
-          status: 'error',
-          error: `Unknown command ${command.command_type}`
-        });
       }
 
       function renderTimeline(frameRefs) {
-        els.timeline.innerHTML = '';
+        stopPlayback();
+        els.player.innerHTML = '';
+        els.playbackInfo.innerHTML = '';
+        els.frameList.innerHTML = '';
         const orderedRefs = [...frameRefs].sort((a, b) => {
           const aTime = Date.parse(a.captured_at || '') || Number(a.offset_ms ?? 0);
           const bTime = Date.parse(b.captured_at || '') || Number(b.offset_ms ?? 0);
           return aTime - bTime;
-        });
-        for (const ref of orderedRefs) {
-          const frame = state.assets.get(ref.device_frame_uuid);
-          const item = document.createElement('div');
-          item.className = 'thumb';
-          const img = document.createElement('img');
-          if (frame) {
-            img.src = frame.dataUrl;
-          } else {
-            img.src = deviceFrameImageUrl(ref.device_frame_uuid);
-            img.onerror = () => {
-              img.remove();
-              item.classList.add('missing');
-            };
-          }
-          item.appendChild(img);
-          const label = document.createElement('small');
-          label.textContent = ref.caption || ref.device_frame_uuid;
-          item.appendChild(label);
-          els.timeline.appendChild(item);
+        }).map(normalizeFrameRef);
+        if (!orderedRefs.length) {
+          const empty = document.createElement('div');
+          empty.className = 'empty';
+          empty.textContent = 'No frames selected.';
+          els.player.appendChild(empty);
+          state.playbackFrames = [];
+          return;
         }
+
+        state.playbackFrames = orderedRefs;
+        state.playbackIndex = 0;
+        const imageA = document.createElement('img');
+        const imageB = document.createElement('img');
+        imageA.alt = 'Rewind frame';
+        imageB.alt = 'Rewind frame';
+        els.player.append(imageA, imageB);
+
+        const infoText = document.createElement('div');
+        const infoTitle = document.createElement('strong');
+        infoTitle.textContent = `${orderedRefs.length} frame${orderedRefs.length === 1 ? '' : 's'} in this rewind`;
+        const infoDetail = document.createElement('span');
+        infoDetail.textContent = 'Looping playback from the device frame cache.';
+        infoText.append(infoTitle, infoDetail);
+        els.playbackInfo.appendChild(infoText);
+
+        orderedRefs.forEach((ref, index) => {
+          const item = document.createElement('button');
+          item.type = 'button';
+          item.className = `frame-row${index === 0 ? ' active' : ''}`;
+          item.onclick = () => {
+            showPlaybackFrame(index, true);
+            restartPlayback();
+          };
+          const img = document.createElement('img');
+          img.src = ref.src;
+          img.alt = `Frame ${index + 1}`;
+          img.onerror = () => {
+            img.remove();
+            item.classList.add('missing');
+          };
+          const text = document.createElement('div');
+          const label = document.createElement('small');
+          label.textContent = `Frame ${index + 1}`;
+          const time = document.createElement('div');
+          time.className = 'frame-time';
+          time.textContent = formatFrameTime(ref, index);
+          text.append(label, time);
+          item.append(img, text);
+          els.frameList.appendChild(item);
+        });
+
+        showPlaybackFrame(0, false);
+        restartPlayback();
+      }
+
+      function normalizeFrameRef(ref) {
+        const frameUuid = ref.device_frame_uuid || ref.uuid;
+        const frame = state.assets.get(frameUuid);
+        return {
+          ...ref,
+          device_frame_uuid: frameUuid,
+          src: frame?.dataUrl || deviceFrameImageUrl(frameUuid)
+        };
+      }
+
+      function showPlaybackFrame(index, immediate) {
+        if (!state.playbackFrames.length) return;
+        state.playbackIndex = ((index % state.playbackFrames.length) + state.playbackFrames.length) % state.playbackFrames.length;
+        const ref = state.playbackFrames[state.playbackIndex];
+        const images = els.player.querySelectorAll('img');
+        if (images.length < 2) return;
+        const current = els.player.querySelector('img.visible');
+        const next = current === images[0] ? images[1] : images[0];
+        next.src = ref.src;
+        next.alt = `Frame ${state.playbackIndex + 1}`;
+        if (immediate) {
+          for (const img of images) img.classList.remove('visible');
+        }
+        requestAnimationFrame(() => {
+          next.classList.add('visible');
+          for (const img of images) {
+            if (img !== next) img.classList.remove('visible');
+          }
+        });
+        for (const [rowIndex, row] of [...els.frameList.querySelectorAll('.frame-row')].entries()) {
+          row.classList.toggle('active', rowIndex === state.playbackIndex);
+        }
+      }
+
+      function restartPlayback() {
+        stopPlayback();
+        if (state.playbackFrames.length < 2) return;
+        state.playbackTimer = setInterval(() => {
+          showPlaybackFrame(state.playbackIndex + 1, false);
+        }, PLAYBACK_INTERVAL_MS);
+      }
+
+      function stopPlayback() {
+        if (!state.playbackTimer) return;
+        clearInterval(state.playbackTimer);
+        state.playbackTimer = null;
+      }
+
+      function formatFrameTime(ref, index) {
+        if (ref.captured_at) {
+          const date = new Date(ref.captured_at);
+          if (!Number.isNaN(date.getTime())) return date.toLocaleTimeString();
+        }
+        if (ref.offset_ms != null) return `+${Math.round(Number(ref.offset_ms) / 1000)}s`;
+        return `Frame ${index + 1}`;
       }
 
       function deviceFrameImageUrl(deviceFrameUuid) {
         return `/device/frames/${encodeURIComponent(deviceFrameUuid)}/image`;
+      }
+
+      async function runManualSearch(event) {
+        event.preventDefault();
+        const query = els.searchInput.value.trim();
+        if (!query || state.searchBusy) return;
+        if (!state.backendReady) {
+          await checkBackendHealth();
+          if (!state.backendReady) {
+            setSummary('Search unavailable', 'Backend is disconnected.', 'error');
+            return;
+          }
+        }
+
+        state.searchBusy = true;
+        updateStreamingControls();
+        setSummary('Searching', query, 'busy');
+        try {
+          const response = await fetch(backendHttpUrl('/v1/rewinds/search'), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-user-id': webConfig.DEV_USER_ID || '00000000-0000-4000-8000-000000000001',
+              'x-device-id': webConfig.DEV_DEVICE_ID || 'dev-phone'
+            },
+            body: JSON.stringify({
+              query,
+              limit: 10
+            })
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || `search ${response.status}`);
+          protocolLog('http.rewind.search', result);
+          log('Manual search results', { query: result.query, results: result.results?.length ?? 0 });
+          setSummary('Search complete', `${result.results.length} result${result.results.length === 1 ? '' : 's'} for "${result.query}".`, 'ok');
+          renderSearchResults(result);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setSummary('Search failed', message, 'error');
+          log('Manual search failed', { error: message });
+        } finally {
+          state.searchBusy = false;
+          updateStreamingControls();
+        }
       }
 
       function send(message) {
@@ -826,15 +1307,10 @@
         state.ws.send(JSON.stringify(message));
       }
 
-      async function sendUserText(text) {
-        await connect();
-        send({ type: 'user.text', text });
-      }
-
       els.stream.onclick = () =>
         startStreaming().catch((error) => {
           const message = describeMediaError(error);
-          els.stream.disabled = false;
+          updateStreamingControls();
           setStatus(`Streaming failed: ${message}`);
           log('Streaming failed', { name: error.name, error: message });
         });
@@ -842,14 +1318,11 @@
       els.muteAudio.onclick = toggleAudioMuted;
       els.frameInterval.onchange = updateFrameInterval;
       els.frameInterval.oninput = updateFrameInterval;
-      els.send.onclick = () => sendUserText(els.utterance.value);
-      els.ask.onclick = () => sendUserText(els.search.value);
-      els.utterance.onkeydown = (event) => {
-        if (event.key === 'Enter') els.send.click();
-      };
-      els.search.onkeydown = (event) => {
-        if (event.key === 'Enter') els.ask.click();
-      };
+      els.searchForm.onsubmit = runManualSearch;
+      els.searchInput.oninput = updateStreamingControls;
+      window.addEventListener('beforeunload', stopPlayback);
+      checkBackendHealth();
+      setInterval(checkBackendHealth, BACKEND_HEALTH_INTERVAL_MS);
     </script>
   </body>
 </html>

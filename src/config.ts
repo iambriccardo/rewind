@@ -1,6 +1,5 @@
 import { config as loadDotenv } from 'dotenv';
-import { existsSync, readFileSync } from 'node:fs';
-import { networkInterfaces } from 'node:os';
+import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 
 loadDotenv({ path: '.env.backend', override: true });
@@ -19,27 +18,24 @@ const EnvSchema = z.object({
   HOST: z.string().default('0.0.0.0'),
   DEV_USER_ID: z.uuid().default('00000000-0000-4000-8000-000000000001'),
   DEV_DEVICE_ID: z.string().default('dev-phone'),
-  REPOSITORY_MODE: z.enum(['local', 'supabase']).optional(),
-  LOCAL_DATA_PATH: z.string().default('.data/rewind.json'),
   SUPABASE_URL: z.preprocess(emptyToUndefined, z.string().url().optional()),
   SUPABASE_SERVICE_ROLE_KEY: z.preprocess(emptyToUndefined, z.string().optional()),
   MODEL_API_KEY: z.preprocess(emptyToUndefined, z.string().optional()),
   EMBEDDING_MODE: z.enum(['text_only', 'text_and_image']).default('text_only'),
+  TEXT_EMBEDDING_MODEL: z.preprocess(emptyToUndefined, z.string().optional()).default(ModelDefaults.TEXT_EMBEDDING_MODEL),
+  IMAGE_EMBEDDING_MODEL: z.preprocess(emptyToUndefined, z.string().optional()).default(ModelDefaults.IMAGE_EMBEDDING_MODEL),
   LIVE_MODEL_NAME: z.string().default('gemini-2.5-flash-native-audio-preview-12-2025'),
-  SERVE_DEMO_APP: envBool(false),
   DEV_HTTPS: envBool(false),
   TLS_CERT_PATH: z.string().optional(),
   TLS_KEY_PATH: z.string().optional()
 });
 
 const parsed = EnvSchema.parse(process.env);
-const hasSupabase = Boolean(parsed.SUPABASE_URL && parsed.SUPABASE_SERVICE_ROLE_KEY);
 
 export const config = {
   ...ModelDefaults,
   ...parsed,
-  repositoryMode: parsed.REPOSITORY_MODE === 'local' ? 'local' : parsed.REPOSITORY_MODE ?? (hasSupabase ? 'supabase' : 'local'),
-  hasSupabase,
+  repositoryMode: parsed.SUPABASE_URL?.includes('127.0.0.1') || parsed.SUPABASE_URL?.includes('host.docker.internal') ? 'supabase-local' : 'supabase-remote',
   httpsOptions:
     parsed.DEV_HTTPS && parsed.TLS_CERT_PATH && parsed.TLS_KEY_PATH
       ? {
@@ -48,28 +44,6 @@ export const config = {
         }
       : undefined
 };
-
-export function getLanUrls(protocol: 'http' | 'https', port: number): string[] {
-  const urls: string[] = [];
-  for (const entries of Object.values(networkInterfaces())) {
-    for (const entry of entries ?? []) {
-      if (entry.family === 'IPv4' && !entry.internal) {
-        urls.push(`${protocol}://${entry.address}:${port}/phone.html`);
-      }
-    }
-  }
-  return urls;
-}
-
-export function assertHttpsFiles(): void {
-  if (!parsed.DEV_HTTPS) return;
-  if (!parsed.TLS_CERT_PATH || !parsed.TLS_KEY_PATH) {
-    throw new Error('DEV_HTTPS=true requires TLS_CERT_PATH and TLS_KEY_PATH.');
-  }
-  if (!existsSync(parsed.TLS_CERT_PATH) || !existsSync(parsed.TLS_KEY_PATH)) {
-    throw new Error('TLS cert/key files do not exist.');
-  }
-}
 
 function envBool(defaultValue: boolean) {
   return z

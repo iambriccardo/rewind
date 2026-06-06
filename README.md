@@ -9,11 +9,11 @@ Local MVP for a real-time rewind memory agent. The backend accepts a live device
 - Browser phone simulator served separately with `npm run web`
 - Supabase migrations for rewind events and rewind frames
 - `pgvector` + HNSW search RPC for combined embedding + metadata/full-text filtering
-- Tool-call/tool-result debug protocol messages visible in the simulator
+- Product-level Rewind protocol messages visible in the simulator
 - Gemini Live function calling with `MODEL_API_KEY`
-- Gemini Live protocol support for text, image/video frames, audio chunks, tool calls, and manual tool responses
+- Gemini Live protocol support for text, image/video frames, audio chunks, and internal backend tool handling
 - Gemini embeddings using `gemini-embedding-2` with 768 dimensions by default
-- Optional frame embedding mode that stores direct multimodal frame vectors for pgvector search
+- Optional frame embedding mode that embeds selected frame images with `gemini-embedding-2` and stores frame vectors for pgvector search
 
 ## Quick Start
 
@@ -24,7 +24,7 @@ npm install
 cp .env.backend.example .env.backend
 cp .env.web.example .env.web
 # Add MODEL_API_KEY to .env.backend
-npm run docker:json
+npm run docker:backend
 ```
 
 In a second terminal:
@@ -39,28 +39,30 @@ Open:
 http://localhost:8788/phone.html
 ```
 
-`npm run docker:json` runs only the backend in Docker with local JSON persistence. It is the fastest backend path and does not require Supabase, but it still requires `MODEL_API_KEY`.
+`npm run docker:backend` runs the backend in Docker against local Supabase. The runner starts or reuses the Supabase CLI local stack, reads its service-role key, and injects container-safe connection values.
 
 Common Docker commands:
 
 ```bash
-npm run docker:backend        # remote Supabase from .env.backend + backend
+npm run docker:backend        # local Supabase Docker stack + backend
 npm run docker:local          # local Supabase Docker stack + backend
-npm run docker:json           # JSON persistence, fastest local backend
+npm run docker:remote         # hosted Supabase from .env.backend + backend
 npm run web                   # phone web app from public/
 npm run docker:logs           # follow app container logs
 npm run docker:down           # stop/remove the app container
 ```
 
+The backend app Compose project is named `rewind-backend`. If local Supabase is running, OrbStack may also show a separate `rewind` group for the Supabase CLI stack; that group contains containers such as `supabase_db_rewind` and is not the backend app.
+
 Advanced options:
 
 ```bash
-npm run docker:run -- --data remote|local|json --port 8787
+npm run docker:run -- --data local|remote --port 8787
 npm run docker:run -- --data local --reset-db
 npm run docker:run -- --data remote --no-open
 ```
 
-The Docker runner uses `.env.backend` as the source of truth every time it starts. If `.env.backend` does not exist, it creates one from `.env.backend.example` or migrates an existing legacy `.env`. The Rewind backend container is recreated on each Docker start so changed env values are applied. Local Supabase is not restarted if it is already running.
+The Docker runner reloads `.env.backend` every time it starts. If `.env.backend` does not exist, it creates one from `.env.backend.example`. It writes a short-lived temporary Compose env file, recreates the Rewind backend container so changed values are applied, then deletes the temporary env file after Docker has read it. Local Supabase is not restarted if it is already running.
 
 After backend code changes, rerun the same Docker command, for example:
 
@@ -70,10 +72,9 @@ npm run docker:backend
 
 The Docker image copies only `src/` at build time. It does not copy or serve `public/`. For phone UI changes, restart `npm run web` or reload the browser. For hot reload while editing backend code, use the non-Docker commands under "Non-Docker Development".
 
-For remote Supabase backend runs, set these in `.env.backend`:
+For remote Supabase backend runs, set these in `.env.backend` only when you explicitly want to use the hosted database:
 
 ```bash
-REPOSITORY_MODE=supabase
 SUPABASE_URL=...
 SUPABASE_SERVICE_ROLE_KEY=...
 MODEL_API_KEY=...
@@ -92,15 +93,22 @@ The phone app reads browser-safe config from `.env.web`:
 ```bash
 WEB_PORT=8788
 BACKEND_URL=http://localhost:8787
+WEB_FRAME_STORE_PATH=.data/device-frames
+```
+
+The standalone phone simulator writes captured JPEG frames to `WEB_FRAME_STORE_PATH` on the machine running `npm run web`. This imitates the iOS-side frame cache: the backend stores and returns `device_frame_uuid` references, and the simulator renders `/device/frames/:uuid/image` locally when `rewind.search_results` includes frame refs. The folder is append-only for now and grows until you delete it by hand:
+
+```bash
+rm -rf .data/device-frames
 ```
 
 Try:
 
 1. Click `Start Streaming`.
 2. Allow camera access if available.
-3. Type `remember where I left this pen`.
-4. Then type `where is my pen?`.
-5. Inspect the `Tool JSON` panel for normalized tool calls/results.
+3. Say something like `remember where I left this pen`.
+4. Then ask by voice, for example `where is my pen?`.
+5. Open `Dev protocol JSON` only when you need to inspect `rewind.save_request` or `rewind.search_results`.
 
 The simulator also has:
 
@@ -110,12 +118,138 @@ The simulator also has:
 
 The demo keeps realtime media cheap by default: camera frames are resized to a 384px max edge, encoded as moderate-quality JPEGs, and forwarded to Gemini Live at 1 FPS by default. The `Frame every` control can raise that interval up to 60 seconds to reduce Live API media tokens. The rolling frame buffer still captures locally at 1 FPS for 30 seconds, so rewind commits keep useful temporal coverage even when realtime model observation is throttled. A rewind indexes at most 12 frame embeddings. Audio is downsampled in the browser to 16 kHz little-endian PCM and sent in 250 ms chunks with `audio/pcm;rate=16000`.
 
+## Client Protocol
+
+The WebSocket protocol is intentionally product-level. Gemini function calls are backend internals and are never forwarded to clients as tool calls.
+
+Client to backend over `/v1/live`:
+
+```json
+{ "type": "user.text", "text": "remember where I left this" }
+```
+
+```json
+{
+  "type": "user.media",
+  "modality": "audio",
+  "mime_type": "audio/pcm;rate=16000",
+  "data": "<base64>",
+  "seq": 42,
+  "timestamp": "2026-06-06T15:30:00.000Z"
+}
+```
+
+```json
+{ "type": "user.media_end", "modality": "audio" }
+```
+
+Backend to client over `/v1/live`:
+
+```json
+{
+  "type": "rewind.save_request",
+  "request_id": "gemini-function-call-id",
+  "event_id": "rewind-event-uuid",
+  "upload_url": "/v1/rewinds/rewind-event-uuid/commit",
+  "title": "Pen location",
+  "description": "User asked to remember where the pen was left.",
+  "rewind_duration_seconds": 8,
+  "include_frame_images": false,
+  "frame_embedding_mode": "text_only"
+}
+```
+
+On `rewind.save_request`, the client should copy the requested slice from its local rolling frame buffer and upload it out-of-band with `POST upload_url`. The live socket should keep streaming and must not wait on the upload.
+
+```json
+{
+  "type": "rewind.search_results",
+  "query": "where is my pen",
+  "filters": { "entities": ["pen"] },
+  "results": [
+    {
+      "event_id": "rewind-event-uuid",
+      "title": "Pen location",
+      "description": "User left the pen on the desk.",
+      "entities": ["pen", "desk"],
+      "location_hint": "desk",
+      "started_at": "2026-06-06T15:29:52.000Z",
+      "ended_at": "2026-06-06T15:30:00.000Z",
+      "score": {
+        "similarity": 0.82,
+        "event_similarity": 0.82,
+        "frame_similarity": null,
+        "text_rank": 0.6
+      },
+      "frame_refs": [
+        {
+          "frame_id": "stored-frame-row-uuid",
+          "device_frame_uuid": "client-frame-uuid",
+          "captured_at": "2026-06-06T15:29:59.000Z",
+          "offset_ms": 7000
+        }
+      ]
+    }
+  ]
+}
+```
+
+The only out-of-band upload endpoint currently needed by clients is:
+
+```http
+POST /v1/rewinds/:event_id/commit
+```
+
+Commit payload:
+
+```json
+{
+  "event_id": "rewind-event-uuid",
+  "local_asset_id": "client-local-asset-id",
+  "thumbnail_frame_uuid": "client-frame-uuid",
+  "started_at": "2026-06-06T15:29:52.000Z",
+  "ended_at": "2026-06-06T15:30:00.000Z",
+  "frames": [
+    {
+      "device_frame_uuid": "client-frame-uuid",
+      "local_asset_id": "client-local-asset-id",
+      "captured_at": "2026-06-06T15:29:59.000Z",
+      "offset_ms": 7000
+    }
+  ],
+  "metadata": {
+    "rewind_duration_seconds": 8,
+    "frame_embedding_mode": "text_only"
+  }
+}
+```
+
+If `include_frame_images` is true, include `image_base64` and `mime_type` on up to the requested frames. The backend may generate frame embeddings and then discards raw image bytes before storage. In `text_only`, image bytes should not be uploaded.
+
+Manual/database search uses the same search code path as the Gemini Live `search_rewinds` tool:
+
+```http
+POST /v1/rewinds/search
+```
+
+```json
+{
+  "query": "where is my pen",
+  "limit": 10,
+  "entities": ["pen"],
+  "time_range": {
+    "started_after": "2026-06-06T00:00:00.000Z"
+  }
+}
+```
+
+It returns the same `query`, `filters`, and `results` shape as `rewind.search_results`.
+
 ## Non-Docker Development
 
 The older local Node runner is still available for quick code iteration:
 
 ```bash
-npm run dev:json
 npm run dev:local
 npm run dev:remote
 npm run web
@@ -123,7 +257,7 @@ npm run web
 
 ## Supabase
 
-The CLI is linked to the hosted Supabase project:
+The CLI may be linked to the hosted Supabase project, but do not push, migrate, or query remote Supabase unless explicitly requested.
 
 ```txt
 rewind / eoczmtezhqteujpwgbwz
@@ -136,11 +270,7 @@ npm run supabase:start
 supabase status -o env
 ```
 
-For the Docker local mode you do not need to copy these values; `npm run docker:local` reads them automatically and injects container-safe values into the backend container. For manual non-Docker runs, copy the printed local URL and service-role key into `.env.backend`, then set:
-
-```bash
-REPOSITORY_MODE=supabase
-```
+For Docker local mode you do not need to copy these values; `npm run docker:local` reads them automatically and injects container-safe values into the backend container. For manual non-Docker runs, copy the printed local URL and service-role key into `.env.backend`.
 
 Apply migrations locally:
 
@@ -148,7 +278,7 @@ Apply migrations locally:
 npm run supabase:reset
 ```
 
-Push to the linked hosted project when ready:
+Push to the linked hosted project only when explicitly requested:
 
 ```bash
 npm run supabase:push
@@ -160,6 +290,14 @@ The repo keeps the DB setup in one squashed initial migration:
 
 The search setup uses `extensions.vector(768)`, cosine HNSW indexes on event and frame embeddings, trigger-maintained `search_tsv`, GIN indexes for full-text/entities, and time/device helper indexes. The RPC pulls event-vector, frame-vector, text, and recent candidates separately, applies filters first, then merges scores so semantic search and database-style search both stay usable.
 
+The vector search path follows current pgvector/Supabase guidance for this scale:
+
+- HNSW is the default ANN index for low-latency, high-recall reads.
+- `vector_cosine_ops` matches Gemini embeddings and the backend normalizes vectors before storage.
+- `hnsw.ef_search=100`, `hnsw.iterative_scan=strict_order`, and larger scan guardrails are set inside the search RPC so filtered user/status queries can recover enough candidates.
+- Search fetches more candidates than the final limit, then hybrid-ranks semantic similarity plus full-text rank.
+- Recency is a tie-breaker inside relevance buckets, not part of the embedding and not a global boost.
+
 Local Supabase uses the same migrations. Run Docker/OrbStack first, then:
 
 ```bash
@@ -168,13 +306,7 @@ npm run supabase:reset
 supabase status -o env
 ```
 
-Copy the local service-role key into `.env.backend` and keep `REPOSITORY_MODE=supabase`.
-
-For no-database non-Docker persistence:
-
-```bash
-REPOSITORY_MODE=local npm run dev
-```
+Copy the local service-role key into `.env.backend` for manual non-Docker runs.
 
 Because `.env.backend` is loaded as the backend source of truth, edit `.env.backend` directly for persistent backend settings. Edit `.env.web` for phone app settings such as `BACKEND_URL`.
 
@@ -185,35 +317,44 @@ Set these in `.env.backend`:
 ```bash
 MODEL_API_KEY=...
 EMBEDDING_MODE=text_only
+TEXT_EMBEDDING_MODEL=gemini-embedding-2
+IMAGE_EMBEDDING_MODEL=gemini-embedding-2
 LIVE_MODEL_NAME=gemini-2.5-flash-native-audio-preview-12-2025
 ```
 
-`MODEL_API_KEY` is required for Live sessions and embeddings. `EMBEDDING_MODE` is the only embedding behavior switch: keep `text_only` for the cheapest path, or use `text_and_image` to index selected rewind frames too.
+`MODEL_API_KEY` is required for Live sessions and embeddings. `EMBEDDING_MODE` is the behavior switch: keep `text_only` for the cheapest path, or use `text_and_image` to index selected rewind frames too.
 
 Model defaults are code constants for this MVP:
 
-- `TEXT_EMBEDDING_MODEL=gemini-embedding-2`: current Gemini embedding default, used for rewind event text.
-- `IMAGE_EMBEDDING_MODEL=gemini-embedding-2`: direct multimodal frame embeddings when frame indexing is enabled.
+- `TEXT_EMBEDDING_MODEL=gemini-embedding-2`: current Gemini multimodal embedding default, used for rewind event text.
+- `IMAGE_EMBEDDING_MODEL=gemini-embedding-2`: same embedding space for selected image frames in `text_and_image`.
 - `EMBEDDING_DIMENSION=768`: smaller/faster pgvector index with good retrieval quality and lower storage than 1536/3072.
 - `FRAME_EMBEDDING_MAX_PER_REWIND=12`: bounded indexing cost per rewind while preserving enough visual evidence for short captures.
 
-The agent prompt is intentionally passive: streamed audio/video can be observed, but it should not call tools unless the user explicitly asks to remember/save/capture a rewind or search/find/show a rewind. `create_rewind` tool calls must include `rewind_duration_seconds`.
+The agent prompt is intentionally passive and optimized for a realtime voice loop:
+
+- It uses short, explicit sections and two narrow tools only.
+- Native audio sessions use Google Live `v1alpha` plus `proactivity.proactiveAudio=true`, so irrelevant background audio can be ignored.
+- Gemini server-side activity detection stays enabled, with low media resolution and audio/video turn coverage so recent video context is available when speech is vague.
+- `create_rewind` is only emitted after explicit save/remember intent. It must include `rewind_duration_seconds`, a concise title/description, and inferred `entities`.
+- Vague phrases such as `remember where I put this` should resolve `this` from recent camera/audio context. Entities should include concrete visible objects, surfaces, containers, places, readable labels/text, and actions when useful for search.
 
 ## Embedding Modes
 
 `EMBEDDING_MODE=text_only`:
 
 - Embeds the rewind event text only.
-- Uses title, description, entities, and location hint.
-- Phone commits only frame IDs, timestamps, captions, and metadata.
+- Uses title, description, inferred entities, and location hint.
+- Phone uploads only frame IDs, timestamps, and purposeful commit metadata.
 - Cheapest and best default.
 
 `EMBEDDING_MODE=text_and_image`:
 
 - Embeds the rewind event text.
-- Also asks the phone simulator to send transient frame JPEG data during `rewind.commit`.
-- Backend embeds up to 12 frames per rewind. This cap is fixed in code for the hackathon MVP.
-- Backend uses the multimodal embedding default to store frame vectors plus frame IDs/timestamps/captions/metadata. Raw image bytes are discarded before DB insert.
+- Also asks the phone simulator to include transient frame JPEG data in the out-of-band commit upload.
+- Backend embeds up to 12 selected frame images with `gemini-embedding-2`. This cap is fixed in code for the hackathon MVP.
+- Backend stores frame vectors plus frame IDs/timestamps/metadata. Raw image bytes are discarded before DB insert.
+- Event embeddings remain event-level only: Live-inferred title, description, entities, and location. Frame embeddings are used as supporting evidence during retrieval.
 
 Relevant env:
 
@@ -227,7 +368,7 @@ For frame embeddings:
 EMBEDDING_MODE=text_and_image
 ```
 
-The backend still has a vision-summary fallback path if the image model constant is changed to a non-embedding Gemini vision model later, but the default path is direct multimodal embedding.
+This path intentionally uses Gemini API features that work with `MODEL_API_KEY`: image understanding through `generateContent`, then multimodal image+text frame embeddings through `gemini-embedding-2`. Google's separate Vertex multimodal embedding model is not used in this local MVP because it needs a different Vertex setup and dimensions.
 
 The selected Live testing model is `gemini-2.5-flash-native-audio-preview-12-2025`. It is a native-audio Live model, so the backend configures audio response modality, output audio transcription, low media resolution, and manual tool handling. If `LIVE_MODEL_NAME` is changed to a non-native-audio Live model, the backend switches back to text response modality.
 
@@ -238,9 +379,9 @@ Desktop browsers can use camera access on `localhost`. A phone connecting to you
 Use `mkcert` or another local CA to create a trusted cert, then set:
 
 ```bash
-DEV_HTTPS=true
-TLS_CERT_PATH=certs/rewind.local.pem
-TLS_KEY_PATH=certs/rewind.local-key.pem
+WEB_HTTPS=true
+WEB_TLS_CERT_PATH=certs/rewind.local.pem
+WEB_TLS_KEY_PATH=certs/rewind.local-key.pem
 ```
 
 For phone-over-LAN testing, set `WEB_HOST=0.0.0.0` and `BACKEND_URL` in `.env.web` to your backend LAN URL. Camera/mic access on a phone usually requires HTTPS for the web app, so set `WEB_HTTPS=true` plus `WEB_TLS_CERT_PATH` and `WEB_TLS_KEY_PATH` when using trusted local certs.
@@ -252,4 +393,3 @@ For phone-over-LAN testing, set `WEB_HOST=0.0.0.0` and `BACKEND_URL` in `.env.we
 - `.env.web` contains browser-safe phone app settings only.
 - `EMBEDDING_MODE=text_only` embeds stored rewind text only.
 - `EMBEDDING_MODE=text_and_image` also asks the phone to include transient frame JPEGs for the fixed 12-frame indexing cap.
-- `SERVE_DEMO_APP=false` keeps the backend APIs from serving `/phone.html`; this is the default and the Docker image does not include `public/`.
