@@ -11,6 +11,7 @@ import type {
   RewindEvent,
   RewindFrame,
   RewindSaveRequest,
+  RewindSearchStarted,
   RewindSearchResults,
   SessionHello,
   ServerMessage,
@@ -559,6 +560,9 @@ async function runToolCalls(
 ): Promise<void> {
   for (const toolCall of toolCalls) {
     const normalizedToolCall = normalizeToolCall(toolCall, context.last_user_text);
+    if (normalizedToolCall.name === 'search_rewinds') {
+      sendJson(socket, { type: 'rewind.search_started', ...searchStartedMessage(normalizedToolCall) });
+    }
     let result: JsonObject;
     try {
       result = await toolRouter.route({ ...context, toolCall: normalizedToolCall });
@@ -596,6 +600,54 @@ function normalizeToolCall(toolCall: ToolCall, lastUserText?: string): ToolCall 
       query: lastUserText.trim()
     }
   };
+}
+
+function searchStartedMessage(toolCall: ToolCall): RewindSearchStarted {
+  const query = normalizeMessageText(toolCall.args.query, 'your search');
+  const text = normalizeMessageText(toolCall.args.status_text, `Searching your rewinds for ${query}...`);
+  const filters = {
+    time_range: searchStartedTimeRange(toolCall.args.time_range),
+    entities: searchStartedEntities(toolCall.args.entities),
+    location_hint: normalizeOptionalMessageText(toolCall.args.location_hint)
+  };
+  return {
+    request_id: toolCall.id,
+    query,
+    text,
+    filters: hasSearchStartedFilters(filters) ? filters : undefined
+  };
+}
+
+function hasSearchStartedFilters(filters: NonNullable<RewindSearchStarted['filters']>): boolean {
+  return Boolean(filters.time_range || filters.entities?.length || filters.location_hint);
+}
+
+function searchStartedTimeRange(value: unknown): NonNullable<RewindSearchStarted['filters']>['time_range'] | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const range = value as Record<string, unknown>;
+  const startedAfter = normalizeOptionalMessageText(range.started_after);
+  const endedBefore = normalizeOptionalMessageText(range.ended_before);
+  if (!startedAfter && !endedBefore) return undefined;
+  return {
+    started_after: startedAfter,
+    ended_before: endedBefore
+  };
+}
+
+function searchStartedEntities(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const entities = [...new Set(value.map((entity) => normalizeOptionalMessageText(entity)).filter((entity): entity is string => Boolean(entity)))];
+  return entities.length ? entities : undefined;
+}
+
+function normalizeMessageText(value: unknown, fallback: string): string {
+  return normalizeOptionalMessageText(value) ?? fallback;
+}
+
+function normalizeOptionalMessageText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  return normalized || undefined;
 }
 
 function sendPendingAgentTexts(socket: WebSocket, agent: GeminiLiveAgent): void {

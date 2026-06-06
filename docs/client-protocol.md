@@ -106,7 +106,7 @@ ws://localhost:8787/v1/live?user_id=...&device_id=...
 The live socket is only for low-latency interaction:
 
 - Client to backend: `session.hello`, `user.text`, `user.media`, `user.media_end`.
-- Backend to client: `session.ready`, `agent.live_state`, `agent.message`, `agent.media`, `rewind.save_request`, `rewind.search_results`, `error`.
+- Backend to client: `session.ready`, `agent.live_state`, `agent.message`, `agent.media`, `rewind.save_request`, `rewind.search_started`, `rewind.search_results`, `error`.
 - Rewind frame uploads are never sent over this socket. They use `POST /v1/rewinds/:id/commit`.
 
 ### State Machine
@@ -122,7 +122,8 @@ stateDiagram-v2
   Ready --> Ready: client streams user.media, user.text, user.media_end
   Ready --> UploadingOutOfBand: backend sends rewind.save_request
   UploadingOutOfBand --> Ready: client POSTs upload_url independently
-  Ready --> ResultsVisible: backend sends rewind.search_results
+  Ready --> Searching: backend sends rewind.search_started
+  Searching --> ResultsVisible: backend sends rewind.search_results
   ResultsVisible --> Ready: client renders local frame refs
   Ready --> Closed: socket closes
   Failed --> Closed: socket closes
@@ -266,6 +267,23 @@ Agent media:
 ```
 
 `agent.media.modality` can be `text` or `audio`. Audio includes `mime_type` and base64 `data`.
+
+Search progress:
+
+```json
+{
+  "type": "rewind.search_started",
+  "request_id": "gemini-function-call-id",
+  "query": "where is my pen?",
+  "text": "Searching your rewinds for the pen...",
+  "filters": {
+    "entities": ["pen"],
+    "location_hint": "desk"
+  }
+}
+```
+
+The backend sends `rewind.search_started` immediately after Gemini Live emits a `search_rewinds` tool call, before embeddings, database search, or result hydration. Clients should render it as transient progress and replace it when `rewind.search_results` arrives.
 
 ## Creating A Rewind
 

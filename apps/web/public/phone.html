@@ -199,6 +199,45 @@
       .memory-card.active {
         border-color: #3d9e72;
       }
+      .search-loading {
+        cursor: default;
+        border-color: #9b8d51;
+      }
+      .search-loading:hover {
+        border-color: #9b8d51;
+      }
+      .loading-dots {
+        display: inline-flex;
+        gap: 3px;
+        margin-left: 6px;
+        vertical-align: middle;
+      }
+      .loading-dots span {
+        width: 4px;
+        height: 4px;
+        border-radius: 999px;
+        background: #f0dfa6;
+        opacity: 0.35;
+        animation: pulse-dot 1s infinite ease-in-out;
+      }
+      .loading-dots span:nth-child(2) {
+        animation-delay: 0.15s;
+      }
+      .loading-dots span:nth-child(3) {
+        animation-delay: 0.3s;
+      }
+      @keyframes pulse-dot {
+        0%,
+        80%,
+        100% {
+          opacity: 0.35;
+          transform: translateY(0);
+        }
+        40% {
+          opacity: 1;
+          transform: translateY(-2px);
+        }
+      }
       .memory-meta {
         display: flex;
         flex-wrap: wrap;
@@ -530,6 +569,46 @@
           els.results.appendChild(card);
         });
         renderTimeline(message.results[0]?.frame_refs || []);
+      }
+
+      function renderSearchStarted(message) {
+        els.results.innerHTML = '';
+        const card = document.createElement('div');
+        card.className = 'memory-card search-loading';
+        card.setAttribute('aria-live', 'polite');
+
+        const strong = document.createElement('strong');
+        strong.textContent = 'Searching';
+        const dots = document.createElement('span');
+        dots.className = 'loading-dots';
+        dots.setAttribute('aria-hidden', 'true');
+        for (let index = 0; index < 3; index += 1) dots.appendChild(document.createElement('span'));
+        strong.appendChild(dots);
+        card.appendChild(strong);
+
+        const small = document.createElement('small');
+        small.textContent = message.text || `Searching your rewinds for "${message.query}".`;
+        card.appendChild(small);
+
+        const meta = [
+          message.query ? `query ${message.query}` : null,
+          message.filters?.entities?.length ? message.filters.entities.join(', ') : null,
+          message.filters?.location_hint || null
+        ].filter(Boolean);
+        if (meta.length) {
+          const row = document.createElement('div');
+          row.className = 'memory-meta';
+          for (const value of meta) {
+            const pill = document.createElement('span');
+            pill.className = 'pill';
+            pill.textContent = value;
+            row.appendChild(pill);
+          }
+          card.appendChild(row);
+        }
+
+        els.results.appendChild(card);
+        renderTimeline([]);
       }
 
       function memoryCard({ title, description, meta = [], active = false, onClick }) {
@@ -1162,7 +1241,18 @@
           });
           return;
         }
+        if (message.type === 'rewind.search_started') {
+          state.searchBusy = true;
+          updateStreamingControls();
+          protocolLog('rewind.search_started', message);
+          log('Search started', { query: message.query, text: message.text });
+          setSummary('Searching', message.text || message.query, 'busy');
+          renderSearchStarted(message);
+          return;
+        }
         if (message.type === 'rewind.search_results') {
+          state.searchBusy = false;
+          updateStreamingControls();
           protocolLog('rewind.search_results', message);
           log('Search results', { query: message.query, results: message.results.length });
           setSummary('Search complete', `${message.results.length} result${message.results.length === 1 ? '' : 's'} for "${message.query}".`, 'ok');
@@ -1170,6 +1260,8 @@
           return;
         }
         if (message.type === 'error') {
+          state.searchBusy = false;
+          updateStreamingControls();
           setSummary('Protocol error', message.error, 'error');
         }
         log(message.type, message);

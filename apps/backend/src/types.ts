@@ -170,11 +170,23 @@ export type RewindSearchResults = {
   results: RewindProtocolResult[];
 };
 
+export type RewindSearchStarted = {
+  request_id: string;
+  query: string;
+  text: string;
+  filters?: {
+    time_range?: RewindSearchContext['time_range'];
+    entities?: string[];
+    location_hint?: string;
+  };
+};
+
 export type ServerMessage =
   | { type: 'session.ready'; session_id: string; user_id: string; device_id: string; max_rewind_duration_seconds?: number }
   | { type: 'agent.message'; text: string; payload?: JsonObject }
   | { type: 'agent.live_state'; state: 'connecting' | 'transport_open' | 'connected' | 'closed' | 'error'; payload?: JsonObject }
   | { type: 'agent.media'; modality: 'audio' | 'text'; mime_type?: string; data?: string; text?: string; seq?: number }
   | ({ type: 'rewind.save_request' } & RewindSaveRequest)
+  | ({ type: 'rewind.search_started' } & RewindSearchStarted)
   | ({ type: 'rewind.search_results' } & RewindSearchResults)
   | { type: 'error'; error: string; details?: unknown };

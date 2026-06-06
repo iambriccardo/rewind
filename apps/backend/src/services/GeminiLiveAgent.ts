@@ -93,6 +93,11 @@ export class GeminiLiveAgent {
           additionalProperties: false,
           properties: {
             query: { type: 'string' },
+            status_text: {
+              type: 'string',
+              description:
+                'A short present-progress sentence for the client to show while the search runs, for example "Searching your rewinds for the pen...". Keep it under 120 characters.'
+            },
             limit: { type: 'integer', minimum: 1, maximum: 20 },
             time_range: {
               type: 'object',
@@ -115,7 +120,7 @@ export class GeminiLiveAgent {
               description: 'Optional physical/spatial hint when the user asks about a specific place or surface.'
             }
           },
-          required: ['query']
+          required: ['query', 'status_text']
         }
       }
     ];
@@ -399,6 +404,7 @@ function systemInstruction(clientSession: NormalizedClientSession): string {
     '# Search Rewinds',
     '- Call search_rewinds when the user asks where something is, what happened, or asks to find/search/show a memory.',
     '- query should preserve the natural user request plus the likely referent if visible/audible context clarifies it.',
+    '- status_text is REQUIRED and should be a concise present-progress sentence that the client can display immediately while the backend searches, such as "Searching your rewinds for the pen...".',
     '- For date phrases such as today, yesterday, this morning, this week, last week, this month, last month, or last N days/weeks/months, set time_range with UTC ISO datetimes covering the matching client-local period.',
     '- Weeks start on Monday. Use started_after as the start of the local period and ended_before as the exclusive end of the local period, converted to UTC ISO datetime with a trailing Z.',
     '- Add entities, time_range, or location_hint only when they narrow the search.',
