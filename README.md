@@ -16,6 +16,12 @@ Local MVP for a real-time rewind memory agent. The backend accepts a live device
 - Optional frame embedding mode that embeds selected frame images with `gemini-embedding-2` and stores frame vectors for pgvector search
 - Client implementer reference for HTTP endpoints and the live WebSocket state machine in [docs/client-protocol.md](docs/client-protocol.md)
 
+## Time Handling
+
+The system stores, compares, and returns timestamps as UTC ISO 8601 instants with a trailing `Z`. The only local-time fields in the protocol are `session.hello.context.time_zone` and `session.hello.context.utc_offset_minutes`, which tell the model/backend how to interpret user phrases such as `this morning`, `today`, or `last week`.
+
+In practice: clients send frame capture times in UTC, the backend normalizes accepted timestamps before writing to Supabase, and search converts user-local semantic periods into UTC ranges before querying Postgres.
+
 ## Repository Layout
 
 ```txt
@@ -146,34 +152,26 @@ First message after WebSocket open:
 {
   "type": "session.hello",
   "protocol_version": 1,
-  "timestamp": "2026-06-06T15:30:00.000Z",
   "device": {
     "id": "dev-phone",
-    "kind": "ios",
-    "label": "Riccardo phone"
+    "kind": "ios"
   },
   "buffers": {
     "rewind": {
       "duration_ms": 60000,
       "frame_interval_ms": 1000,
       "max_frames": 60
-    },
-    "realtime": {
-      "image_interval_ms": 1000,
-      "audio_chunk_ms": 250,
-      "audio_sample_rate_hz": 16000
     }
   },
-  "capabilities": {
-    "out_of_band_rewind_upload": true,
-    "local_frame_store": true,
-    "image_upload_for_embedding": true,
-    "manual_search": true
+  "context": {
+    "current_time": "2026-06-06T15:30:00.000Z",
+    "time_zone": "Europe/Vienna",
+    "utc_offset_minutes": 120
   }
 }
 ```
 
-The backend uses `buffers.rewind.duration_ms` to configure the Gemini Live tool schema and prompt. `create_rewind.rewind_duration_seconds` is clamped to the available buffer, and the model is instructed to choose the smallest useful replay window.
+The backend uses `buffers.rewind.duration_ms` to configure the Gemini Live tool schema and prompt. `create_rewind` is optimized for the current or just-finished moment, not arbitrary historical capture. If the user says `save the last 20 seconds` or `remind me about the last minute`, the model uses that rolling-buffer duration, clamped to the available buffer; otherwise it infers the smallest useful replay window. The backend then anchors the save request to the UTC time when the Gemini Live tool call is received and sends an explicit capture window so client uploads are not shifted by later backend or network delay.
 
 After `session.ready`, the client may stream text/media:
 
@@ -217,12 +215,16 @@ Backend to client over `/v1/live`:
   "title": "Pen location",
   "description": "User asked to remember where the pen was left.",
   "rewind_duration_seconds": 8,
+  "capture_anchor_utc": "2026-06-06T15:30:00.000Z",
+  "capture_duration_ms": 8000,
+  "capture_window_started_at": "2026-06-06T15:29:52.000Z",
+  "capture_window_ended_at": "2026-06-06T15:30:00.000Z",
   "include_frame_images": false,
   "frame_embedding_mode": "text_only"
 }
 ```
 
-On `rewind.save_request`, the client should copy the requested slice from its local rolling frame buffer and upload it out-of-band with `POST upload_url`. The live socket should keep streaming and must not wait on the upload.
+On `rewind.save_request`, the client should copy frames from its local rolling buffer whose timestamps fall inside `[capture_window_started_at, capture_window_ended_at]` and upload them out-of-band with `POST upload_url`. The live socket should keep streaming and must not wait on the upload.
 
 ```json
 {
@@ -282,6 +284,10 @@ Commit payload:
   ],
   "metadata": {
     "rewind_duration_seconds": 8,
+    "capture_anchor_utc": "2026-06-06T15:30:00.000Z",
+    "capture_duration_ms": 8000,
+    "capture_window_started_at": "2026-06-06T15:29:52.000Z",
+    "capture_window_ended_at": "2026-06-06T15:30:00.000Z",
     "frame_embedding_mode": "text_only"
   }
 }
@@ -356,6 +362,7 @@ The vector search path follows current pgvector/Supabase guidance for this scale
 - `hnsw.ef_search=100`, `hnsw.iterative_scan=strict_order`, and larger scan guardrails are set inside the search RPC so filtered user/status queries can recover enough candidates.
 - Search fetches more candidates than the final limit, then hybrid-ranks semantic similarity plus full-text rank.
 - Recency is a tie-breaker inside relevance buckets, not part of the embedding and not a global boost.
+- Relative date search is resolved outside embeddings. `today`, `yesterday`, `this week`, `last week`, `this month`, `last month`, and `last N days/weeks/months` become explicit UTC time ranges using the client timezone.
 
 Local Supabase uses the same migrations. Run Docker/OrbStack first, then:
 
@@ -395,9 +402,10 @@ The agent prompt is intentionally passive and optimized for a realtime voice loo
 - It uses short, explicit sections and two narrow tools only.
 - Native audio sessions use Google Live `v1alpha` plus `proactivity.proactiveAudio=true`, so irrelevant background audio can be ignored.
 - Gemini server-side activity detection stays enabled, with low media resolution and audio/video turn coverage so recent video context is available when speech is vague.
+- The phone sends client time, timezone, and UTC offset during `session.hello`; the prompt uses that context for relative date phrases such as `today`, `this week`, and `last week`. Latitude/longitude is collected only after a `rewind.save_request`, then sent in the out-of-band commit upload.
 - `create_rewind` is only emitted after explicit save/remember/capture/bookmark/log intent. The prompt accepts clear variants such as "do not let me forget this" or "record this for later", and generalizes across languages when the user directly asks to preserve the current context without listing non-English examples.
 - Privacy is stricter than recall flexibility: ambient conversation, "look at this", "this is interesting", surprise, narration, or uncertain phrases should not create rewinds. Ambiguous save intent should stay passive or get a brief clarification.
-- A save request must include `rewind_duration_seconds`, a concise title/description, and inferred `entities`; duration is bounded by `session.hello.buffers.rewind.duration_ms` and should be the smallest useful replay window.
+- A save request must include `rewind_duration_seconds`, a concise title/description, and inferred `entities`; duration is bounded by `session.hello.buffers.rewind.duration_ms` and should be the explicit rolling-buffer duration the user asked for, or the smallest useful replay window ending at the current tool-call anchor. Historical calendar periods belong to search, not create.
 - Vague phrases such as `remember where I put this` should resolve `this` from recent camera/audio context. Entities should include concrete visible objects, surfaces, containers, places, readable labels/text, and actions when useful for search.
 
 ## Embedding Modes

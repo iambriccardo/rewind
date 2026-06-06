@@ -4,6 +4,12 @@ This document is the client implementer contract for the Rewind MVP. It describe
 
 The backend owns Gemini Live, function calling, embeddings, Supabase writes, and search ranking. Clients talk only to the Rewind product protocol. Gemini tool calls are backend internals and must not be exposed as a client API.
 
+## Time Handling
+
+All protocol timestamps are UTC ISO 8601 instants with a trailing `Z`, except `session.hello.context.time_zone` and `session.hello.context.utc_offset_minutes`, which describe the user's local semantic context. Clients should capture and upload frame timestamps in UTC. The backend normalizes accepted timestamps to UTC before persistence and before returning API responses.
+
+Relative phrases such as `today`, `this morning`, `this week`, and `last week` are interpreted in the user's timezone, then converted to UTC time ranges for search and database queries. Do not store or compare local wall-clock timestamps as system state.
+
 ## Base URL And Identity
 
 Local backend default:
@@ -140,29 +146,21 @@ First client message after WebSocket open:
 {
   "type": "session.hello",
   "protocol_version": 1,
-  "timestamp": "2026-06-06T15:30:00.000Z",
   "device": {
     "id": "dev-phone",
-    "kind": "ios",
-    "label": "Riccardo phone"
+    "kind": "ios"
   },
   "buffers": {
     "rewind": {
       "duration_ms": 60000,
       "frame_interval_ms": 1000,
       "max_frames": 60
-    },
-    "realtime": {
-      "image_interval_ms": 1000,
-      "audio_chunk_ms": 250,
-      "audio_sample_rate_hz": 16000
     }
   },
-  "capabilities": {
-    "out_of_band_rewind_upload": true,
-    "local_frame_store": true,
-    "image_upload_for_embedding": true,
-    "manual_search": true
+  "context": {
+    "current_time": "2026-06-06T15:30:00.000Z",
+    "time_zone": "Europe/Vienna",
+    "utc_offset_minutes": 120
   }
 }
 ```
@@ -175,11 +173,13 @@ Validation limits:
 | `buffers.rewind.duration_ms` | `1` to `300000`. |
 | `buffers.rewind.frame_interval_ms` | Optional, `1` to `60000`. |
 | `buffers.rewind.max_frames` | Optional, `1` to `10000`. |
-| `buffers.realtime.image_interval_ms` | Optional, `1` to `60000`. |
-| `buffers.realtime.audio_chunk_ms` | Optional, `1` to `10000`. |
-| `buffers.realtime.audio_sample_rate_hz` | Optional, `1` to `192000`. |
+| `context.current_time` | Optional UTC ISO datetime; defaults to backend receive time if omitted. |
+| `context.time_zone` | Optional IANA timezone, for example `Europe/Vienna`. |
+| `context.utc_offset_minutes` | Optional integer offset from UTC, `-840` to `840`. |
 
-The backend uses `buffers.rewind.duration_ms` to set the maximum `rewind_duration_seconds` that Gemini Live may request. The prompt asks the model to choose the smallest useful replay window rather than always using the full buffer.
+The backend uses `buffers.rewind.duration_ms` to set the maximum `rewind_duration_seconds` that Gemini Live may request. Create/save is optimized for the current or just-finished moment, not arbitrary historical capture. If the user says an explicit rolling-buffer duration such as `save the last 20 seconds` or `remind me about the last minute`, the model should use that duration, clamped to the available buffer. Otherwise it chooses the smallest useful duration from the current context. The backend anchors that duration to the UTC time when the Live tool call is received and sends an explicit capture window in `rewind.save_request`.
+
+The backend uses `context.current_time`, `context.time_zone`, and `context.utc_offset_minutes` to resolve relative date phrases such as `today`, `yesterday`, `this morning`, `this week`, and `last week`. Clients should send an IANA timezone when available. Do not send latitude/longitude in `session.hello`; coordinates belong only in the out-of-band rewind commit upload after a save request.
 
 ### Session Ready
 
@@ -269,7 +269,7 @@ Agent media:
 
 ## Creating A Rewind
 
-When Gemini Live decides the user asked to remember something, the backend creates a pending event and sends:
+When Gemini Live decides the user asked to remember the current or just-finished moment, the backend creates a pending event and sends:
 
 ```json
 {
@@ -280,6 +280,10 @@ When Gemini Live decides the user asked to remember something, the backend creat
   "title": "Pen location",
   "description": "User asked to remember where the pen was left.",
   "rewind_duration_seconds": 8,
+  "capture_anchor_utc": "2026-06-06T15:30:00.000Z",
+  "capture_duration_ms": 8000,
+  "capture_window_started_at": "2026-06-06T15:29:52.000Z",
+  "capture_window_ended_at": "2026-06-06T15:30:00.000Z",
   "include_frame_images": false,
   "frame_embedding_mode": "text_only"
 }
@@ -288,9 +292,13 @@ When Gemini Live decides the user asked to remember something, the backend creat
 Client behavior:
 
 1. Keep the live socket running.
-2. Select the last `rewind_duration_seconds` from the local frame buffer.
+2. Select local frames whose `captured_at` falls inside `[capture_window_started_at, capture_window_ended_at]`.
 3. Upload the selected frame references to `upload_url`.
 4. Include raw frame bytes only when `include_frame_images` is `true`.
+
+`capture_anchor_utc` is the UTC timestamp where the requested rewind ends. The backend stamps it when it receives the Gemini Live tool call, before embedding generation or pending-event persistence, so slower backend work does not shift the selected media window. `capture_duration_ms` is the authoritative duration for client frame selection; `rewind_duration_seconds` is kept for display and simple clients.
+
+Create/save requests do not target arbitrary dates or older memories. `last 20 seconds` or `last minute` in a save command means the current rolling device buffer ending at `capture_anchor_utc`. If the user asks for something from yesterday, last week, or another past period, the model should use `search_rewinds`, not `create_rewind`.
 
 The pending event already contains the model-inferred title, description, entities, location hint, and event embedding. The commit attaches frame references, timestamps, optional location, and optional frame embeddings.
 
@@ -327,12 +335,20 @@ Payload:
   ],
   "metadata": {
     "rewind_duration_seconds": 8,
-    "frame_embedding_mode": "text_only"
+    "capture_anchor_utc": "2026-06-06T15:30:00.000Z",
+    "capture_duration_ms": 8000,
+    "capture_window_started_at": "2026-06-06T15:29:52.000Z",
+    "capture_window_ended_at": "2026-06-06T15:30:00.000Z",
+    "frame_embedding_mode": "text_only",
+    "client_time_zone": "Europe/Vienna",
+    "client_utc_offset_minutes": 120,
+    "location_accuracy_meters": 35,
+    "location_captured_at": "2026-06-06T15:29:58.000Z"
   }
 }
 ```
 
-When `include_frame_images` is `true`, each selected frame may also include:
+Clients should request/read geolocation only when handling `rewind.save_request`, then include the best available latitude/longitude in this commit payload. When `include_frame_images` is `true`, each selected frame may also include:
 
 ```json
 {
@@ -392,6 +408,11 @@ Payload:
     "started_after": "2026-06-06T00:00:00.000Z",
     "ended_before": "2026-06-07T00:00:00.000Z"
   },
+  "client_context": {
+    "current_time": "2026-06-06T15:30:00.000Z",
+    "time_zone": "Europe/Vienna",
+    "utc_offset_minutes": 120
+  },
   "context": {
     "status": ["committed"],
     "database_filters": {}
@@ -412,9 +433,12 @@ Optional:
 | `limit` | Defaults to `10`, maximum `20` through the HTTP/tool schema. |
 | `entities` | Narrows matches to events with overlapping extracted entities. |
 | `location_hint` | Narrows by fuzzy location hint. |
-| `time_range.started_after` | ISO datetime lower bound. |
-| `time_range.ended_before` | ISO datetime upper bound. |
-| `context` | Alternate container for the same filters, useful for future clients. |
+| `time_range.started_after` | UTC ISO datetime lower bound. |
+| `time_range.ended_before` | UTC ISO datetime upper bound. |
+| `client_context` | Current client time, timezone, and UTC offset for relative date parsing. |
+| `context` | Alternate container for database filters such as `status`, useful for future clients. |
+
+If `time_range` is omitted, the backend can infer a range from common relative phrases in `query`: `today`, `yesterday`, `this morning`, `this afternoon`, `tonight`, `this week`, `last week`, `this month`, `last month`, and `last N days/weeks/months`. This inference uses `client_context.current_time/time_zone` when supplied, weeks start on Monday, and the inferred range is returned as UTC ISO datetimes. Sub-day periods are client-local: morning is `00:00-12:00`, afternoon is `12:00-18:00`, and evening/tonight is `18:00-24:00`.
 
 HTTP response. The live socket emits the same object with an added top-level `"type": "rewind.search_results"` field.
 
@@ -525,7 +549,7 @@ List/detail responses never include vector values or raw image bytes.
 2. Connect to `/v1/live` with stable user/device identity.
 3. Send `session.hello` immediately and wait for `session.ready`.
 4. Stream realtime audio and optional images through `user.media`.
-5. On `rewind.save_request`, upload the requested frame window to `upload_url` over HTTP without blocking the live socket.
+5. On `rewind.save_request`, upload the requested anchored frame window to `upload_url` over HTTP without blocking the live socket.
 6. On `rewind.search_results`, render result metadata and resolve `frame_refs[].device_frame_uuid` against the local frame cache.
 7. Use `POST /v1/rewinds/search` for manual search screens; it returns the same result shape as Live search.
 8. Treat embeddings, Gemini messages, and Supabase implementation details as backend internals.

@@ -67,7 +67,7 @@ export class GeminiLiveAgent {
               type: 'array',
               items: { type: 'string' },
               description:
-                'Concrete searchable entities inferred from the utterance and recent camera/audio context: objects, people, places, visible labels/text, surfaces, containers, and actions. Include the likely referent even when the user only says this or that.'
+                'Lowercase plain searchable labels inferred from the utterance and recent camera/audio context: objects, people, places, visible labels/text, surfaces, containers, and actions. Use short noun phrases without quotes, JSON, punctuation wrappers, or generic labels. Include the likely referent even when the user only says this or that.'
             },
             location_hint: {
               type: 'string',
@@ -78,7 +78,7 @@ export class GeminiLiveAgent {
               minimum: 1,
               maximum: this.clientSession.maxRewindDurationSeconds,
               description:
-                'How many seconds of the phone rolling buffer should be preserved for this rewind. Must be at most the client buffer capacity.'
+                'How many seconds of the phone rolling buffer should be preserved, ending at the backend save-request anchor. If the user says a duration like last 20 seconds or last minute, use that duration clamped to the client buffer. Otherwise infer the smallest useful current-moment window.'
             }
           },
           required: ['title', 'description', 'entities', 'rewind_duration_seconds']
@@ -96,17 +96,19 @@ export class GeminiLiveAgent {
             limit: { type: 'integer', minimum: 1, maximum: 20 },
             time_range: {
               type: 'object',
+              description:
+                'Optional UTC ISO datetime range. Use this for relative date requests such as today, yesterday, this week, last week, this month, last month, or last N days/weeks/months. Resolve the semantic period in the client timezone, then emit UTC instants.',
               additionalProperties: false,
               properties: {
-                started_after: { type: 'string' },
-                ended_before: { type: 'string' }
+                started_after: { type: 'string', description: 'Inclusive lower bound as a UTC ISO datetime ending in Z.' },
+                ended_before: { type: 'string', description: 'Exclusive upper bound as a UTC ISO datetime ending in Z.' }
               }
             },
             entities: {
               type: 'array',
               items: { type: 'string' },
               description:
-                'Concrete entities from the search request and likely synonyms. Use these only when they narrow the database search.'
+                'Lowercase plain entities from the search request and likely synonyms. Use short strings only, and include these only when they narrow the database search.'
             },
             location_hint: {
               type: 'string',
@@ -267,7 +269,7 @@ export class GeminiLiveAgent {
         session_resumption: message.sessionResumptionUpdate
       });
     }
-    const calls = normalizeFunctionCalls(message.toolCall?.functionCalls ?? []);
+    const calls = normalizeFunctionCalls(message.toolCall?.functionCalls ?? [], new Date().toISOString());
     if (calls.length) {
       void callbacks.onToolCalls(calls);
     }
@@ -335,13 +337,14 @@ export type NormalizedClientSession = {
   maxRewindDurationSeconds: number;
 };
 
-function normalizeFunctionCalls(calls: FunctionCall[]): ToolCall[] {
+function normalizeFunctionCalls(calls: FunctionCall[], receivedAt: string): ToolCall[] {
   return calls
     .filter((call): call is FunctionCall & { name: SupportedToolName } => Boolean(call.name) && SUPPORTED_TOOLS.includes(call.name as SupportedToolName))
     .map((call) => ({
       id: call.id ?? crypto.randomUUID(),
       name: call.name,
-      args: call.args ?? {}
+      args: call.args ?? {},
+      received_at: receivedAt
     }));
 }
 
@@ -352,37 +355,51 @@ function usesNativeAudioModel(model: string): boolean {
 function systemInstruction(clientSession: NormalizedClientSession): string {
   const maxSeconds = clientSession.maxRewindDurationSeconds;
   const bufferMs = clientSession.bufferDurationMs;
+  const clientContext = clientSession.hello.context;
+  const currentTime = clientContext?.current_time ?? new Date().toISOString();
+  const timeZone = clientContext?.time_zone ?? 'unknown';
+  const utcOffset = clientContext?.utc_offset_minutes;
   return [
     '# Role',
     '- You are Rewind, a quiet real-time memory agent behind a trusted phone client.',
     '- The phone owns camera/audio rolling buffers and local media. The backend stores structured memory metadata, frame UUIDs, timestamps, location hints, and embeddings.',
     '',
+    '# Client Context',
+    `- Current client time: ${currentTime}.`,
+    `- Client timezone: ${timeZone}${utcOffset === undefined ? '' : `, UTC offset minutes: ${utcOffset}`}.`,
+    '- Interpret relative date phrases using the client time and timezone, not server time. After resolving the user-local period, emit all datetimes as UTC ISO strings ending in Z.',
+    '',
     '# Default Behavior',
     '- STAY PASSIVE unless the user explicitly asks to remember/save/capture/bookmark/log something or asks to search/find/show a previous memory.',
     '- Background audio, video, or images alone are observation context only. Do not talk just because something changed on camera.',
     '- Do not ask to store raw image/video bytes. The trusted device handles frame upload after a save request.',
+    '- The backend anchors each save request to the UTC time when the Live tool call is received. Create is for the current moment only; the phone selects recent frames from the rolling buffer ending at that anchor. Do not encode timestamps, historical dates, or frame IDs in create_rewind arguments.',
     '- Privacy rule: never create a rewind from ambient conversation, vague interest, surprise, or background activity alone. Require a direct user request to preserve the moment.',
     '',
     '# Create Rewind',
-    '- Call create_rewind when the user clearly asks to preserve the current or just-finished moment.',
-    '- English save-intent examples: "remember this", "remember that", "save this", "save this moment", "capture this", "record this for later", "bookmark this", "log this", "note this", "keep this", "remember where I put this", "remember where I left X", "remember that I did X", "remind me where this is", "don\'t let me forget this", "I want to remember this later", "store this memory", "mark this spot", "save where this is".',
+    '- Call create_rewind when the user clearly asks to preserve the current or just-finished moment. This is not a historical lookup and should not save an arbitrary point in the past.',
+    '- Treat direct reminder/save phrasing as save intent when it refers to the current scene or just-finished action, for example "remind me about this", "remind me about that", "save this about the pen", "remember what I just did", "save the last 20 seconds", "remind me about the last 20 seconds", or "remember the last minute of me doing this".',
+    '- English save-intent examples: "remember this", "remember that", "save this", "save this moment", "capture this", "record this for later", "bookmark this", "log this", "note this", "keep this", "remember where I put this", "remember where I left X", "remember that I did X", "remind me about this", "remind me where this is", "don\'t let me forget this", "I want to remember this later", "store this memory", "mark this spot", "save where this is".',
     '- Generalize save intent across languages without relying on exact keywords, but only when the utterance is clearly a direct request to preserve/store/remember the current context.',
     '- Do NOT call create_rewind for weak or non-imperative phrases like "this is interesting", "look at this", "wow", "that was cool", "I might need this", "maybe remember", ordinary narration, or a search question. If intent is ambiguous, stay passive or give a brief clarification instead of saving.',
     `- The trusted phone reports a rolling rewind buffer of ${bufferMs} ms, so rewind_duration_seconds MUST be between 1 and ${maxSeconds}. Never request more than the available buffer.`,
-    '- ALWAYS include rewind_duration_seconds. Choose the smallest useful replay window, not a generic long clip.',
-    '- Duration guidance: a quick object/location memory usually needs 4-8 seconds; an object shown briefly for about 2 seconds should use about 3-5 seconds; a short action should use 6-12 seconds; use a longer duration only when the user explicitly asks for more context or the relevant action visibly spans longer.',
+    '- ALWAYS include rewind_duration_seconds. Priority order: first honor an explicit user duration such as "last 20 seconds", "the last minute", "the past 30 seconds", or "the whole last 45 seconds"; otherwise infer the smallest useful replay window, not a generic long clip.',
+    '- Convert user durations to seconds. Use 20 for "last 20 seconds"; use 60 for "last minute"; clamp anything longer than the reported buffer down to the maximum available buffer. If the user says "last few seconds", choose about 5 seconds.',
+    '- Duration inference guidance when no explicit duration is given: a quick object/location memory usually needs 4-8 seconds; an object shown briefly for about 2 seconds should use about 3-5 seconds; a short action should use 6-12 seconds; use a longer duration only when the user explicitly asks for more context or the relevant action visibly spans longer.',
     '- If uncertain, prefer a shorter window that still contains the object/action and immediate context. Do not request 20 seconds for a simple static object memory.',
     '- Infer the memory from ALL RECENT CONTEXT: the user words, audio history, visible camera frames, visible text, object positions, places, surfaces, and actions.',
     '- If the user says "this", "that", "it", "here", or "where I put this", resolve the referent from the camera/video context.',
-    '- entities is REQUIRED. Include concrete searchable labels: objects, people, places, surfaces, containers, visible text/brands, and actions. Use short noun phrases. Avoid generic words like thing, stuff, object, moment, memory.',
+    '- entities is REQUIRED. It must be a simple array of lowercase strings. Include concrete searchable labels: objects, people, places, surfaces, containers, visible text/brands, and actions. Use short noun phrases. Do not include quotes inside the strings, JSON-like structures, bullets, full sentences, or generic words like thing, stuff, object, moment, memory.',
     '- description must be a compact retrieval summary: what happened, what object/action matters, where it is, and the spatial relationship that would help future search.',
     '- title should be short and human-readable.',
     '- location_hint is optional but should be included for useful physical hints such as desk, table, shelf, drawer, kitchen counter, backpack, room, or visible area.',
-    '- Keep create_rewind arguments compact. Do not include raw transcripts, protocol details, base64, frame IDs, or unnecessary metadata.',
+    '- Keep create_rewind arguments compact. Do not include raw transcripts, protocol details, base64, frame IDs, timestamps, dates, or unnecessary metadata.',
     '',
     '# Search Rewinds',
     '- Call search_rewinds when the user asks where something is, what happened, or asks to find/search/show a memory.',
     '- query should preserve the natural user request plus the likely referent if visible/audible context clarifies it.',
+    '- For date phrases such as today, yesterday, this morning, this week, last week, this month, last month, or last N days/weeks/months, set time_range with UTC ISO datetimes covering the matching client-local period.',
+    '- Weeks start on Monday. Use started_after as the start of the local period and ended_before as the exclusive end of the local period, converted to UTC ISO datetime with a trailing Z.',
     '- Add entities, time_range, or location_hint only when they narrow the search.',
     '- Search results are returned directly to the phone client by the backend. Do not ask for a second show/display action.',
     '',

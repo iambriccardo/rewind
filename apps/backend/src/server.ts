@@ -21,6 +21,7 @@ import { GeminiLiveAgent, type NormalizedClientSession } from './services/Gemini
 import { createRepository } from './services/RewindRepository.js';
 import { SupervisionLogger } from './services/SupervisionLogger.js';
 import { ToolRouter } from './services/ToolRouter.js';
+import { isValidInstant, normalizeKnownMetadataInstants, nullableUtcIso, optionalUtcIso, utcIso } from './utils/time.js';
 
 const MAX_UPLOAD_BODY_BYTES = 25_000_000;
 const fastifyOptions: Record<string, unknown> = { logger: true, bodyLimit: MAX_UPLOAD_BODY_BYTES };
@@ -102,7 +103,7 @@ app.post<{ Params: { id: string }; Body: RewindCommitRequest }>('/v1/rewinds/:id
   if (validationError) return reply.code(400).send({ error: validationError });
   const existing = await repository.getRewindDetails({ user_id: userId, event_id: request.params.id });
   if (!existing || existing.event.device_id !== deviceId) return reply.code(404).send({ error: 'Not found' });
-  const body = await prepareCommitPayload(request.body);
+  const body = await prepareCommitPayload(normalizeCommitTimes(request.body));
   const eventEmbedding = await buildCommittedEventEmbedding(existing.event, body);
   const result = await repository.commitRewind({
     ...body,
@@ -117,7 +118,7 @@ app.post<{ Params: { id: string }; Body: RewindCommitRequest }>('/v1/rewinds/:id
     metadata: {
       ...existing.event.metadata,
       ...(body.metadata ?? {}),
-      event_embedding_refreshed_at: new Date().toISOString(),
+      event_embedding_refreshed_at: utcIso(new Date()),
       event_embedding_sources: ['live_summary', 'entities', 'location_hint']
     }
   });
@@ -253,7 +254,8 @@ app.get('/v1/live', { websocket: true }, async (socket, request) => {
             user_id: input.user_id,
             device_id: input.device_id,
             last_user_text: input.get_last_user_text(),
-            max_rewind_duration_seconds: clientSession.maxRewindDurationSeconds
+            max_rewind_duration_seconds: clientSession.maxRewindDurationSeconds,
+            client_context: clientSession.hello.context
           },
           agent,
           toolCalls
@@ -299,40 +301,21 @@ function normalizeSessionHello(message: SessionHello, deviceId: string): Normali
           min: 1,
           max: 10_000
         });
-  const realtime = message.buffers.realtime;
   const normalized: SessionHello = {
     type: 'session.hello',
     protocol_version: 1,
-    timestamp: typeof message.timestamp === 'string' ? message.timestamp : new Date().toISOString(),
     device: {
       id: typeof message.device?.id === 'string' ? message.device.id : deviceId,
-      kind: typeof message.device?.kind === 'string' ? message.device.kind : 'unknown',
-      label: typeof message.device?.label === 'string' ? message.device.label : undefined
+      kind: typeof message.device?.kind === 'string' ? message.device.kind : 'unknown'
     },
     buffers: {
       rewind: {
         duration_ms: bufferDurationMs,
         frame_interval_ms: frameIntervalMs,
         max_frames: maxFrames
-      },
-      realtime: realtime
-        ? {
-            image_interval_ms:
-              realtime.image_interval_ms === undefined
-                ? undefined
-                : boundedInteger(realtime.image_interval_ms, { name: 'buffers.realtime.image_interval_ms', min: 1, max: 60_000 }),
-            audio_chunk_ms:
-              realtime.audio_chunk_ms === undefined
-                ? undefined
-                : boundedInteger(realtime.audio_chunk_ms, { name: 'buffers.realtime.audio_chunk_ms', min: 1, max: 10_000 }),
-            audio_sample_rate_hz:
-              realtime.audio_sample_rate_hz === undefined
-                ? undefined
-                : boundedInteger(realtime.audio_sample_rate_hz, { name: 'buffers.realtime.audio_sample_rate_hz', min: 1, max: 192_000 })
-          }
-        : undefined
+      }
     },
-    capabilities: message.capabilities && typeof message.capabilities === 'object' ? message.capabilities : {}
+    context: normalizeClientContext(message.context)
   };
   return {
     hello: normalized,
@@ -346,6 +329,36 @@ function boundedInteger(value: unknown, options: { name: string; min: number; ma
     throw new Error(`${options.name} must be an integer between ${options.min} and ${options.max}.`);
   }
   return value;
+}
+
+function normalizeClientContext(context: unknown): SessionHello['context'] {
+  if (!context || typeof context !== 'object') {
+    return {
+      current_time: utcIso(new Date()),
+      utc_offset_minutes: 0
+    };
+  }
+  const input = context as Record<string, unknown>;
+  const timeZone = typeof input.time_zone === 'string' && isValidTimeZone(input.time_zone) ? input.time_zone : undefined;
+  const currentTime = isValidInstant(input.current_time) ? utcIso(input.current_time) : utcIso(new Date());
+  const utcOffsetMinutes =
+    typeof input.utc_offset_minutes === 'number' && Number.isInteger(input.utc_offset_minutes) && input.utc_offset_minutes >= -840 && input.utc_offset_minutes <= 840
+      ? input.utc_offset_minutes
+      : undefined;
+  return {
+    current_time: currentTime,
+    time_zone: timeZone,
+    utc_offset_minutes: utcOffsetMinutes
+  };
+}
+
+function isValidTimeZone(timeZone: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone }).format(new Date());
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function handleClientMessage(
@@ -409,15 +422,36 @@ async function handleClientMessage(
 function validateCommitRequest(message: RewindCommitRequest, eventId: string): string | undefined {
   if (!message || typeof message !== 'object') return 'Commit payload must be a JSON object.';
   if (message.event_id && message.event_id !== eventId) return 'Commit event_id must match the URL event_id.';
+  for (const key of ['started_at', 'ended_at'] as const) {
+    if (message[key] && !isValidInstant(message[key])) return `Commit ${key} must be a valid datetime.`;
+  }
+  if (message.started_at && message.ended_at && Date.parse(message.ended_at) < Date.parse(message.started_at)) {
+    return 'Commit ended_at must be greater than or equal to started_at.';
+  }
   if (!Array.isArray(message.frames) || !message.frames.length) return 'Commit payload requires at least one frame.';
   if (message.frames.length > 120) return 'Commit payload contains too many frames.';
   for (const [index, frame] of message.frames.entries()) {
     if (!frame || typeof frame !== 'object') return `Frame ${index} must be an object.`;
     if (!frame.device_frame_uuid || typeof frame.device_frame_uuid !== 'string') return `Frame ${index} requires device_frame_uuid.`;
+    if (frame.captured_at && !isValidInstant(frame.captured_at)) return `Frame ${index} captured_at must be a valid datetime.`;
     if (frame.image_base64 && typeof frame.image_base64 !== 'string') return `Frame ${index} image_base64 must be a string.`;
     if (frame.mime_type && typeof frame.mime_type !== 'string') return `Frame ${index} mime_type must be a string.`;
   }
   return undefined;
+}
+
+function normalizeCommitTimes(message: RewindCommitRequest): RewindCommitRequest {
+  return {
+    ...message,
+    started_at: optionalUtcIso(message.started_at),
+    ended_at: optionalUtcIso(message.ended_at),
+    frames: message.frames.map((frame) => ({
+      ...frame,
+      captured_at: optionalUtcIso(frame.captured_at),
+      metadata: normalizeKnownMetadataInstants(frame.metadata)
+    })),
+    metadata: normalizeKnownMetadataInstants(message.metadata)
+  };
 }
 
 function loggableClientMessage(message: ClientMessage): JsonObject {
@@ -506,7 +540,14 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper:
 
 async function runToolCalls(
   socket: WebSocket,
-  context: { session_id: string; user_id: string; device_id: string; last_user_text?: string; max_rewind_duration_seconds?: number },
+  context: {
+    session_id: string;
+    user_id: string;
+    device_id: string;
+    last_user_text?: string;
+    max_rewind_duration_seconds?: number;
+    client_context?: SessionHello['context'];
+  },
   agent: GeminiLiveAgent,
   toolCalls: ToolCall[]
 ): Promise<void> {
@@ -570,12 +611,24 @@ function publicDetails(details: { event: RewindEvent; frames: RewindFrame[] }) {
 
 function publicEvent(event: RewindEvent) {
   const { embedding, search_tsv, ...safeEvent } = event as RewindEvent & { search_tsv?: unknown };
-  return safeEvent;
+  return {
+    ...safeEvent,
+    started_at: nullableUtcIso(event.started_at),
+    ended_at: nullableUtcIso(event.ended_at),
+    created_at: utcIso(event.created_at),
+    updated_at: utcIso(event.updated_at),
+    metadata: normalizeKnownMetadataInstants(event.metadata)
+  };
 }
 
 function publicFrame(frame: RewindFrame) {
   const { embedding, ...safeFrame } = frame;
-  return safeFrame;
+  return {
+    ...safeFrame,
+    captured_at: nullableUtcIso(frame.captured_at),
+    created_at: utcIso(frame.created_at),
+    metadata: normalizeKnownMetadataInstants(frame.metadata)
+  };
 }
 
 function getUserId(headers: Record<string, unknown>, query: unknown): string {

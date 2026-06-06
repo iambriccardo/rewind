@@ -417,6 +417,8 @@
         backendReady: false,
         backendChecking: false,
         searchBusy: false,
+        lastKnownLocation: null,
+        locationPermission: 'unknown',
         playbackFrames: [],
         playbackIndex: 0,
         playbackTimer: null,
@@ -480,12 +482,13 @@
 
       function renderSavedMemory(request, frameCount, status) {
         els.results.innerHTML = '';
+        const durationSeconds = Math.round((captureDurationMs(request) / 1000) * 10) / 10;
         const card = memoryCard({
           title: request.title,
           description: request.description,
           meta: [
             `${frameCount} frames`,
-            `${request.rewind_duration_seconds || 0}s`,
+            `${durationSeconds}s`,
             status
           ]
         });
@@ -611,6 +614,13 @@
             const microphone = await navigator.permissions.query({ name: 'microphone' });
             details.camera_permission = camera.state;
             details.microphone_permission = microphone.state;
+            try {
+              const geolocation = await navigator.permissions.query({ name: 'geolocation' });
+              details.geolocation_permission = geolocation.state;
+              state.locationPermission = geolocation.state;
+            } catch {
+              details.geolocation_permission = 'unavailable';
+            }
           }
         } catch {
           details.permission_query = 'unavailable';
@@ -632,34 +642,70 @@
         return new URL(path, webConfig.BACKEND_URL || DEFAULT_BACKEND_URL).toString();
       }
 
+      function clientTimeZone() {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+      }
+
+      function clientUtcOffsetMinutes() {
+        return -new Date().getTimezoneOffset();
+      }
+
+      function clientContext() {
+        return {
+          current_time: new Date().toISOString(),
+          time_zone: clientTimeZone(),
+          utc_offset_minutes: clientUtcOffsetMinutes()
+        };
+      }
+
+      function refreshGeolocation({ timeoutMs = 1500, maximumAgeMs = 60_000 } = {}) {
+        if (!navigator.geolocation) return Promise.resolve(null);
+        return new Promise((resolve) => {
+          navigator.geolocation.getCurrentPosition(
+            (position) => {
+              state.lastKnownLocation = {
+                latitude: position.coords.latitude,
+                longitude: position.coords.longitude,
+                accuracy_meters: Math.round(position.coords.accuracy || 0),
+                captured_at: new Date(position.timestamp || Date.now()).toISOString()
+              };
+              state.locationPermission = 'granted';
+              log('Location ready', {
+                accuracy_meters: state.lastKnownLocation.accuracy_meters,
+                captured_at: state.lastKnownLocation.captured_at
+              });
+              resolve(state.lastKnownLocation);
+            },
+            (error) => {
+              state.locationPermission = error.code === error.PERMISSION_DENIED ? 'denied' : 'unavailable';
+              log('Location unavailable', { code: error.code, message: error.message });
+              resolve(null);
+            },
+            {
+              enableHighAccuracy: false,
+              timeout: timeoutMs,
+              maximumAge: maximumAgeMs
+            }
+          );
+        });
+      }
+
       function sessionHelloMessage() {
         return {
           type: 'session.hello',
           protocol_version: 1,
-          timestamp: new Date().toISOString(),
           device: {
             id: webConfig.DEV_DEVICE_ID || 'dev-phone',
-            kind: 'web-demo',
-            label: 'Rewind phone simulator'
+            kind: 'web-demo'
           },
           buffers: {
             rewind: {
               duration_ms: FRAME_BUFFER_DURATION_MS,
               frame_interval_ms: LOCAL_FRAME_CAPTURE_INTERVAL_MS,
               max_frames: FRAME_BUFFER_MAX_FRAMES
-            },
-            realtime: {
-              image_interval_ms: currentFrameIntervalMs(),
-              audio_chunk_ms: AUDIO_CHUNK_MS,
-              audio_sample_rate_hz: AUDIO_SAMPLE_RATE
             }
           },
-          capabilities: {
-            out_of_band_rewind_upload: true,
-            local_frame_store: true,
-            image_upload_for_embedding: true,
-            manual_search: true
-          }
+          context: clientContext()
         };
       }
 
@@ -1089,7 +1135,8 @@
         }
         if (message.type === 'rewind.save_request') {
           protocolLog('rewind.save_request', message);
-          setSummary('Saving rewind', `${message.title} · ${message.rewind_duration_seconds}s`, 'busy');
+          const durationSeconds = Math.round((captureDurationMs(message) / 1000) * 10) / 10;
+          setSummary('Saving rewind', `${message.title} · ${durationSeconds}s`, 'busy');
           renderSavedMemory(message, 0, 'uploading');
           void captureAndUploadRewind(message);
           return;
@@ -1119,9 +1166,10 @@
       async function captureAndUploadRewind(request) {
         try {
           if (!state.buffer.length) captureFrame();
-          const requestedDurationMs = Math.max(1, Number(request.rewind_duration_seconds || DEFAULT_REWIND_CAPTURE_DURATION_SECONDS)) * 1000;
-          const durationMs = Math.min(FRAME_BUFFER_DURATION_MS, requestedDurationMs);
-          const frames = selectBufferedFrames(durationMs);
+          await refreshGeolocation({ timeoutMs: 1500, maximumAgeMs: 60_000 });
+          const window = captureWindow(request);
+          const durationMs = Math.min(FRAME_BUFFER_DURATION_MS, window.durationMs);
+          const frames = selectBufferedFrames(window);
           await persistFrames(frames);
           renderSavedMemory(request, frames.length, 'uploading');
           const upload = {
@@ -1130,13 +1178,20 @@
             thumbnail_frame_uuid: frames.at(-1)?.uuid,
             started_at: frames[0]?.capturedAt,
             ended_at: frames.at(-1)?.capturedAt,
+            location: state.lastKnownLocation
+              ? {
+                  latitude: state.lastKnownLocation.latitude,
+                  longitude: state.lastKnownLocation.longitude
+                }
+              : undefined,
             frames: frames.map((frame, index) => {
-	              const payload = {
-	                device_frame_uuid: frame.uuid,
-	                local_asset_id: `local-${request.event_id}`,
-	                captured_at: frame.capturedAt,
-	                offset_ms: index * 1000
-	              };
+              const capturedMs = Date.parse(frame.capturedAt);
+              const payload = {
+                device_frame_uuid: frame.uuid,
+                local_asset_id: `local-${request.event_id}`,
+                captured_at: frame.capturedAt,
+                offset_ms: Number.isFinite(capturedMs) ? Math.max(0, capturedMs - window.startedAtMs) : index * LOCAL_FRAME_CAPTURE_INTERVAL_MS
+              };
               if (request.include_frame_images) {
                 payload.image_base64 = frame.dataUrl.split(',')[1];
                 payload.mime_type = 'image/jpeg';
@@ -1145,7 +1200,15 @@
             }),
             metadata: {
               rewind_duration_ms: durationMs,
-              frame_embedding_mode: request.frame_embedding_mode || 'text_only'
+              capture_anchor_utc: window.anchorUtc,
+              capture_duration_ms: durationMs,
+              capture_window_started_at: new Date(window.startedAtMs).toISOString(),
+              capture_window_ended_at: new Date(window.endedAtMs).toISOString(),
+              frame_embedding_mode: request.frame_embedding_mode || 'text_only',
+              client_time_zone: clientTimeZone(),
+              client_utc_offset_minutes: clientUtcOffsetMinutes(),
+              location_accuracy_meters: state.lastKnownLocation?.accuracy_meters,
+              location_captured_at: state.lastKnownLocation?.captured_at
             }
           };
           const response = await fetch(backendHttpUrl(request.upload_url), {
@@ -1177,19 +1240,42 @@
         }
       }
 
-      function selectBufferedFrames(durationMs) {
+      function captureDurationMs(request) {
+        const explicitMs = Number(request.capture_duration_ms);
+        if (Number.isFinite(explicitMs) && explicitMs > 0) return Math.min(FRAME_BUFFER_DURATION_MS, explicitMs);
+        const seconds = Number(request.rewind_duration_seconds || DEFAULT_REWIND_CAPTURE_DURATION_SECONDS);
+        return Math.min(FRAME_BUFFER_DURATION_MS, Math.max(1, seconds) * 1000);
+      }
+
+      function captureWindow(request) {
+        const durationMs = captureDurationMs(request);
+        const anchorMs = Date.parse(request.capture_anchor_utc || request.capture_window_ended_at || '');
+        const endedAtMs = Number.isFinite(anchorMs) ? anchorMs : Date.now();
+        const explicitStartedAtMs = Date.parse(request.capture_window_started_at || '');
+        const startedAtMs = Number.isFinite(explicitStartedAtMs) ? explicitStartedAtMs : endedAtMs - durationMs;
+        return {
+          anchorUtc: new Date(endedAtMs).toISOString(),
+          durationMs,
+          startedAtMs,
+          endedAtMs
+        };
+      }
+
+      function selectBufferedFrames(window) {
         const fallback = state.buffer.at(-1);
         if (!state.buffer.length) return fallback ? [fallback] : [];
-        const lastTimestamp = Date.parse(state.buffer.at(-1).capturedAt);
-        if (!Number.isFinite(lastTimestamp)) {
-          return state.buffer.slice(-Math.max(1, Math.ceil(durationMs / LOCAL_FRAME_CAPTURE_INTERVAL_MS)));
-        }
-        const cutoff = lastTimestamp - durationMs;
         const selected = state.buffer.filter((frame) => {
           const captured = Date.parse(frame.capturedAt);
-          return Number.isFinite(captured) && captured >= cutoff;
+          return Number.isFinite(captured) && captured >= window.startedAtMs && captured <= window.endedAtMs;
         });
-        return selected.length ? selected : [state.buffer.at(-1)];
+        if (selected.length) return selected;
+        const nearestPastFrame = [...state.buffer]
+          .reverse()
+          .find((frame) => {
+            const captured = Date.parse(frame.capturedAt);
+            return Number.isFinite(captured) && captured <= window.endedAtMs;
+          });
+        return [nearestPastFrame || fallback].filter(Boolean);
       }
 
       function renderTimeline(frameRefs) {
@@ -1343,7 +1429,8 @@
             },
             body: JSON.stringify({
               query,
-              limit: 10
+              limit: 10,
+              client_context: clientContext()
             })
           });
           const result = await response.json();

@@ -66,9 +66,41 @@ begin
 end;
 $$;
 
+create function public.normalize_rewind_event_fields()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.title := nullif(trim(regexp_replace(coalesce(new.title, ''), '\s+', ' ', 'g')), '');
+  new.description := nullif(trim(regexp_replace(coalesce(new.description, ''), '\s+', ' ', 'g')), '');
+  new.location_hint := nullif(trim(regexp_replace(lower(coalesce(new.location_hint, '')), '\s+', ' ', 'g')), '');
+  new.entities := coalesce((
+    select array_agg(entity order by first_ord)
+    from (
+      select entity, min(ord) as first_ord
+      from (
+        select
+          nullif(regexp_replace(regexp_replace(btrim(lower(raw), ' "''`()[]{}<>'), '\s+', ' ', 'g'), '^(a|an|the)\s+', ''), '') as entity,
+          ord
+        from unnest(coalesce(new.entities, '{}'::text[])) with ordinality as u(raw, ord)
+      ) cleaned
+      where entity is not null
+        and entity not in ('a','an','it','item','memory','moment','object','something','stuff','that','the','thing','this','user')
+      group by entity
+    ) deduped
+  ), '{}'::text[]);
+  return new;
+end;
+$$;
+
 create trigger rewind_events_set_updated_at
 before update on public.rewind_events
 for each row execute function public.set_updated_at();
+
+create trigger rewind_events_00_normalize_fields
+before insert or update of title, description, entities, location_hint
+on public.rewind_events
+for each row execute function public.normalize_rewind_event_fields();
 
 create trigger rewind_events_update_search_tsv
 before insert or update of title, description, entities, location_hint

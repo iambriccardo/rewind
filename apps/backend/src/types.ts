@@ -71,16 +71,15 @@ export type ToolCall = {
   id: string;
   name: 'create_rewind' | 'search_rewinds';
   args: JsonObject;
+  received_at?: string;
 };
 
 export type SessionHello = {
   type: 'session.hello';
   protocol_version: 1;
-  timestamp?: string;
   device?: {
     id?: string;
     kind?: string;
-    label?: string;
   };
   buffers: {
     rewind: {
@@ -88,13 +87,12 @@ export type SessionHello = {
       frame_interval_ms?: number;
       max_frames?: number;
     };
-    realtime?: {
-      image_interval_ms?: number;
-      audio_chunk_ms?: number;
-      audio_sample_rate_hz?: number;
-    };
   };
-  capabilities?: JsonObject;
+  context?: {
+    current_time?: string;
+    time_zone?: string;
+    utc_offset_minutes?: number;
+  };
 };
 
 export type RewindCommitRequest = {
@@ -154,6 +152,10 @@ export type RewindSaveRequest = {
   title: string;
   description: string;
   rewind_duration_seconds: number;
+  capture_anchor_utc: string;
+  capture_duration_ms: number;
+  capture_window_started_at: string;
+  capture_window_ended_at: string;
   include_frame_images: boolean;
   frame_embedding_mode: 'text_only' | 'text_and_image' | string;
 };
