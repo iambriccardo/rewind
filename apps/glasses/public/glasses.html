@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=600, height=600, initial-scale=1" />
+    <meta name="description" content="Rewind memory display for Meta Ray-Ban Display glasses." />
+    <meta name="mrbd-compatible" content="yes" />
+    <title>Rewind Glasses</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --bg: #000000;
+        --veil: rgba(28, 30, 33, 0.72);
+        --veil-soft: rgba(28, 30, 33, 0.48);
+        --text: #ffffff;
+        --secondary: #e4e6eb;
+        --muted: #b0b3b8;
+        --line: rgba(228, 230, 235, 0.28);
+        --accent: #53d6a1;
+        --accent-2: #8cc8ff;
+        --warn: #f0d070;
+        --error: #ff9b9b;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 600px;
+        height: 600px;
+        margin: 0;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      .surface {
+        position: relative;
+        width: 600px;
+        height: 600px;
+        padding: 8px;
+        overflow: hidden;
+        background:
+          linear-gradient(90deg, rgba(140, 200, 255, 0.24), transparent 58%) 20px 78px / 170px 1px no-repeat,
+          linear-gradient(90deg, transparent, rgba(83, 214, 161, 0.24)) 398px 472px / 178px 1px no-repeat,
+          linear-gradient(180deg, rgba(228, 230, 235, 0.18), transparent 68%) 20px 78px / 1px 132px no-repeat,
+          linear-gradient(180deg, transparent, rgba(228, 230, 235, 0.18)) 575px 340px / 1px 132px no-repeat;
+      }
+
+      header {
+        position: absolute;
+        top: 18px;
+        left: 22px;
+        right: 22px;
+        height: 44px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+      }
+
+      h1,
+      h2,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        font-size: 28px;
+        line-height: 1;
+        font-weight: 760;
+        letter-spacing: 0;
+        text-shadow: 0 0 18px rgba(255, 255, 255, 0.18);
+      }
+
+      h2 {
+        font-size: 25px;
+        line-height: 1.08;
+        font-weight: 720;
+        letter-spacing: 0;
+        text-shadow: 0 0 18px rgba(255, 255, 255, 0.16);
+      }
+
+      .status {
+        justify-self: end;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        color: var(--secondary);
+        font-size: 14px;
+      }
+
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--warn);
+        box-shadow: 0 0 14px rgba(240, 208, 112, 0.54);
+      }
+
+      .dot[data-state="ready"] {
+        background: var(--accent);
+        box-shadow: 0 0 14px rgba(83, 214, 161, 0.58);
+      }
+
+      .dot[data-state="offline"] {
+        background: var(--error);
+        box-shadow: 0 0 14px rgba(255, 155, 155, 0.52);
+      }
+
+      .source {
+        position: absolute;
+        left: 24px;
+        right: 24px;
+        bottom: 94px;
+        min-height: 92px;
+        padding: 10px 14px 12px 16px;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        gap: 6px;
+        border-left: 2px solid var(--accent-2);
+        background: linear-gradient(90deg, var(--veil), rgba(28, 30, 33, 0.18));
+        box-shadow: 0 0 24px rgba(140, 200, 255, 0.08);
+      }
+
+      .label {
+        color: var(--accent-2);
+        font-size: 12px;
+        font-weight: 720;
+        text-transform: uppercase;
+        letter-spacing: 0;
+      }
+
+      .source-text {
+        color: var(--secondary);
+        font-size: 18px;
+        line-height: 1.2;
+        overflow: hidden;
+        text-shadow: 0 0 14px rgba(0, 0, 0, 0.7);
+      }
+
+      .memory {
+        position: absolute;
+        inset: 82px 24px 198px 24px;
+      }
+
+      .memory-copy {
+        position: absolute;
+        left: 0;
+        top: 16px;
+        width: 220px;
+        min-height: 234px;
+        padding: 14px 14px 12px;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+        gap: 8px;
+        background: linear-gradient(135deg, var(--veil), rgba(28, 30, 33, 0.2));
+        border-top: 1px solid var(--line);
+        border-left: 1px solid var(--line);
+        box-shadow: 0 0 26px rgba(83, 214, 161, 0.08);
+      }
+
+      .description {
+        color: var(--secondary);
+        font-size: 16px;
+        line-height: 1.22;
+        overflow: hidden;
+        text-shadow: 0 0 14px rgba(0, 0, 0, 0.7);
+      }
+
+      .meta-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+      }
+
+      .pill {
+        border: 1px solid rgba(228, 230, 235, 0.2);
+        background: var(--veil-soft);
+        color: var(--secondary);
+        min-height: 24px;
+        padding: 4px 7px;
+        font-size: 12px;
+      }
+
+      .frame-stage {
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 342px;
+        height: 318px;
+        overflow: hidden;
+        background: transparent;
+        box-shadow:
+          0 0 0 1px rgba(228, 230, 235, 0.14),
+          0 0 34px rgba(140, 200, 255, 0.1);
+      }
+
+      .frame-stage::before,
+      .frame-stage::after {
+        content: "";
+        position: absolute;
+        z-index: 2;
+        width: 54px;
+        height: 54px;
+        pointer-events: none;
+      }
+
+      .frame-stage::before {
+        top: 0;
+        left: 0;
+        border-top: 2px solid rgba(140, 200, 255, 0.78);
+        border-left: 2px solid rgba(140, 200, 255, 0.78);
+      }
+
+      .frame-stage::after {
+        right: 0;
+        bottom: 0;
+        border-right: 2px solid rgba(83, 214, 161, 0.78);
+        border-bottom: 2px solid rgba(83, 214, 161, 0.78);
+      }
+
+      .frame-stage img {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        opacity: 0;
+        transform: translate3d(14px, 0, 0) scale(1.035);
+        transition:
+          opacity 260ms ease,
+          transform 680ms ease;
+      }
+
+      .frame-stage img.visible {
+        opacity: 1;
+        transform: translate3d(0, 0, 0) scale(1);
+      }
+
+      .frame-count {
+        position: absolute;
+        left: 8px;
+        bottom: 8px;
+        color: var(--text);
+        background: var(--veil);
+        border: 1px solid rgba(228, 230, 235, 0.2);
+        padding: 4px 7px;
+        font-size: 12px;
+      }
+
+      .empty-frame {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 18px;
+        color: var(--muted);
+        text-align: center;
+        font-size: 16px;
+        line-height: 1.25;
+        background: rgba(28, 30, 33, 0.16);
+      }
+
+      form {
+        position: absolute;
+        left: 24px;
+        right: 24px;
+        bottom: 8px;
+        height: 72px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 104px;
+        gap: 8px;
+      }
+
+      input,
+      button {
+        border: 1px solid rgba(228, 230, 235, 0.24);
+        background: var(--veil);
+        color: var(--text);
+        min-height: 72px;
+        border-radius: 0;
+        font: inherit;
+        box-shadow: 0 0 20px rgba(0, 0, 0, 0.28);
+      }
+
+      input {
+        min-width: 0;
+        padding: 0 16px;
+        font-size: 18px;
+      }
+
+      button {
+        cursor: pointer;
+        font-size: 16px;
+        font-weight: 720;
+      }
+
+      .focusable:focus {
+        outline: none;
+        border-color: var(--accent-2);
+        box-shadow:
+          0 0 0 1px rgba(140, 200, 255, 0.72),
+          0 0 24px rgba(140, 200, 255, 0.34);
+      }
+
+      .focusable:active {
+        transform: scale(0.98);
+      }
+
+      .thinking .source {
+        border-color: var(--warn);
+      }
+
+      .thinking .dot {
+        animation: breathe 1.2s ease-in-out infinite;
+      }
+
+      @keyframes breathe {
+        0%,
+        100% {
+          transform: scale(1);
+        }
+        50% {
+          transform: scale(1.32);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main id="surface" class="surface">
+      <header>
+        <h1>Rewind</h1>
+        <div class="status">
+          <span id="statusDot" class="dot" data-state="checking"></span>
+          <span id="statusText">Checking</span>
+        </div>
+      </header>
+
+      <section class="source" aria-live="polite">
+        <div class="label">Source text</div>
+        <p id="sourceText" class="source-text">Ask on the phone, or search here. Results appear without a camera feed.</p>
+      </section>
+
+      <section class="memory">
+        <div class="memory-copy">
+          <div>
+            <div class="label">Top memory</div>
+            <h2 id="memoryTitle">Waiting</h2>
+          </div>
+          <p id="memoryDescription" class="description">The glasses show the top ranked match and local cached frames from the phone simulator.</p>
+          <div id="memoryMeta" class="meta-row">
+            <span class="pill">rank 1</span>
+          </div>
+        </div>
+        <div id="frameStage" class="frame-stage">
+          <div class="empty-frame">Cached frames will move here when a memory is found.</div>
+        </div>
+      </section>
+
+      <form id="searchForm">
+        <input id="searchInput" class="focusable" type="search" autocomplete="off" placeholder="Search memories" />
+        <button id="searchButton" class="focusable" type="submit">Search</button>
+      </form>
+    </main>
+
+    <script src="/env.js"></script>
+    <script src="/rewind-frame-cache.js"></script>
+    <script>
+      const DEFAULT_BACKEND_URL = 'http://localhost:8787';
+      const PLAYBACK_INTERVAL_MS = 620;
+      const webConfig = window.REWIND_WEB_CONFIG || {};
+
+      const state = {
+        backendReady: false,
+        searchBusy: false,
+        playbackFrames: [],
+        playbackIndex: 0,
+        playbackTimer: null
+      };
+
+      const els = {
+        surface: document.getElementById('surface'),
+        statusDot: document.getElementById('statusDot'),
+        statusText: document.getElementById('statusText'),
+        sourceText: document.getElementById('sourceText'),
+        memoryTitle: document.getElementById('memoryTitle'),
+        memoryDescription: document.getElementById('memoryDescription'),
+        memoryMeta: document.getElementById('memoryMeta'),
+        frameStage: document.getElementById('frameStage'),
+        searchForm: document.getElementById('searchForm'),
+        searchInput: document.getElementById('searchInput'),
+        searchButton: document.getElementById('searchButton')
+      };
+
+      function backendHttpUrl(path) {
+        return new URL(path, webConfig.BACKEND_URL || DEFAULT_BACKEND_URL).toString();
+      }
+
+      function clientContext() {
+        return {
+          current_time: new Date().toISOString(),
+          time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || undefined,
+          utc_offset_minutes: -new Date().getTimezoneOffset()
+        };
+      }
+
+      function setStatus(text, stateName) {
+        els.statusText.textContent = text;
+        els.statusDot.dataset.state = stateName;
+      }
+
+      function setThinking(thinking) {
+        state.searchBusy = thinking;
+        els.surface.classList.toggle('thinking', thinking);
+        els.searchButton.disabled = thinking || !state.backendReady;
+        els.searchInput.disabled = thinking || !state.backendReady;
+        els.searchButton.textContent = thinking ? 'Looking' : 'Search';
+      }
+
+      async function checkBackendHealth() {
+        try {
+          const response = await fetch(backendHttpUrl('/health'), { cache: 'no-store' });
+          const health = await response.json();
+          if (!response.ok || !health.ok) throw new Error('not ready');
+          state.backendReady = true;
+          setStatus('Ready', 'ready');
+        } catch {
+          state.backendReady = false;
+          setStatus('Offline', 'offline');
+        } finally {
+          setThinking(false);
+        }
+      }
+
+      function renderSource(text) {
+        els.sourceText.textContent = text || 'Waiting for source text.';
+      }
+
+      function renderEmptyMemory(message) {
+        stopPlayback();
+        els.memoryTitle.textContent = 'No match';
+        els.memoryDescription.textContent = message;
+        renderMeta(['rank 1']);
+        renderFrames([]);
+      }
+
+      async function renderTopMemory(message) {
+        const top = message.results?.[0];
+        if (!top) {
+          renderEmptyMemory(`No memories found for "${message.query || 'this search'}".`);
+          return;
+        }
+
+        els.memoryTitle.textContent = top.title || 'Untitled memory';
+        els.memoryDescription.textContent = top.description || '';
+
+        const score = top.score?.similarity ?? top.score?.event_similarity ?? top.score?.text_rank;
+        renderMeta([
+          'rank 1',
+          score == null ? null : `score ${Number(score).toFixed(2)}`,
+          top.location_hint || null,
+          `${top.frame_refs?.length || 0} refs`
+        ]);
+
+        const frames = await window.RewindFrameCache.compileResultFrames(top, {
+          onError: (error) => console.warn('Frame lookup failed', error)
+        });
+        renderFrames(frames);
+      }
+
+      function renderMeta(values) {
+        els.memoryMeta.innerHTML = '';
+        for (const value of values.filter(Boolean)) {
+          const item = document.createElement('span');
+          item.className = 'pill';
+          item.textContent = value;
+          els.memoryMeta.appendChild(item);
+        }
+      }
+
+      function renderFrames(frames) {
+        stopPlayback();
+        els.frameStage.innerHTML = '';
+        state.playbackFrames = frames;
+        state.playbackIndex = 0;
+
+        if (!frames.length) {
+          const empty = document.createElement('div');
+          empty.className = 'empty-frame';
+          empty.textContent = 'No matching cached phone frames for this memory.';
+          els.frameStage.appendChild(empty);
+          return;
+        }
+
+        const imageA = document.createElement('img');
+        const imageB = document.createElement('img');
+        imageA.alt = 'Memory frame';
+        imageB.alt = 'Memory frame';
+        els.frameStage.append(imageA, imageB);
+
+        const counter = document.createElement('div');
+        counter.id = 'frameCount';
+        counter.className = 'frame-count';
+        els.frameStage.appendChild(counter);
+
+        showFrame(0, true);
+        if (frames.length > 1) {
+          state.playbackTimer = setInterval(() => showFrame(state.playbackIndex + 1, false), PLAYBACK_INTERVAL_MS);
+        }
+      }
+
+      function showFrame(index, immediate) {
+        if (!state.playbackFrames.length) return;
+        state.playbackIndex = ((index % state.playbackFrames.length) + state.playbackFrames.length) % state.playbackFrames.length;
+        const frame = state.playbackFrames[state.playbackIndex];
+        const images = els.frameStage.querySelectorAll('img');
+        if (images.length < 2) return;
+        const current = els.frameStage.querySelector('img.visible');
+        const next = current === images[0] ? images[1] : images[0];
+        next.src = frame.src;
+        if (immediate) images.forEach((image) => image.classList.remove('visible'));
+        requestAnimationFrame(() => {
+          next.classList.add('visible');
+          images.forEach((image) => {
+            if (image !== next) image.classList.remove('visible');
+          });
+        });
+        const counter = document.getElementById('frameCount');
+        if (counter) counter.textContent = `${state.playbackIndex + 1}/${state.playbackFrames.length}`;
+      }
+
+      function stopPlayback() {
+        if (!state.playbackTimer) return;
+        clearInterval(state.playbackTimer);
+        state.playbackTimer = null;
+      }
+
+      async function runManualSearch(event) {
+        event.preventDefault();
+        const query = els.searchInput.value.trim();
+        if (!query || state.searchBusy) return;
+        if (!state.backendReady) await checkBackendHealth();
+        if (!state.backendReady) {
+          renderSource('Backend is offline. Start the local backend first.');
+          return;
+        }
+
+        setThinking(true);
+        renderSource(`Searching: ${query}`);
+        try {
+          const response = await fetch(backendHttpUrl('/v1/rewinds/search'), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-user-id': webConfig.DEV_USER_ID || '00000000-0000-4000-8000-000000000001',
+              'x-device-id': webConfig.DEV_DEVICE_ID || 'dev-phone'
+            },
+            body: JSON.stringify({ query, limit: 10, client_context: clientContext() })
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || `search ${response.status}`);
+          await handleDisplayEvent({ type: 'rewind.search_results', ...result });
+        } catch (error) {
+          renderSource(error.message || String(error));
+          renderEmptyMemory('Search failed.');
+        } finally {
+          setThinking(false);
+        }
+      }
+
+      async function handleDisplayEvent(message) {
+        if (message.type === 'agent.media' && message.modality === 'text') {
+          renderSource(message.text);
+          return;
+        }
+        if (message.type === 'rewind.search_started') {
+          setThinking(true);
+          renderSource(message.text || `Searching: ${message.query}`);
+          return;
+        }
+        if (message.type === 'rewind.search_results') {
+          setThinking(false);
+          renderSource(`Source: ${message.query}`);
+          await renderTopMemory(message);
+        }
+      }
+
+      function wireBridge() {
+        if ('BroadcastChannel' in window) {
+          const channel = new BroadcastChannel('rewind-glasses');
+          channel.onmessage = (event) => void handleDisplayEvent(event.data);
+        }
+        window.addEventListener('storage', (event) => {
+          if (event.key !== 'rewind_glasses_last_event' || !event.newValue) return;
+          try {
+            void handleDisplayEvent(JSON.parse(event.newValue));
+          } catch {
+          }
+        });
+        try {
+          const lastEvent = localStorage.getItem('rewind_glasses_last_event');
+          if (lastEvent) void handleDisplayEvent(JSON.parse(lastEvent));
+        } catch {
+        }
+      }
+
+      function moveFocus(direction) {
+        const items = [...document.querySelectorAll('.focusable:not(:disabled)')];
+        if (!items.length) return;
+        const currentIndex = items.indexOf(document.activeElement);
+        const nextIndex = currentIndex < 0 ? 0 : (currentIndex + direction + items.length) % items.length;
+        items[nextIndex].focus();
+      }
+
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+          event.preventDefault();
+          moveFocus(1);
+        } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          moveFocus(-1);
+        } else if (
+          event.key === 'Enter' &&
+          document.activeElement?.classList.contains('focusable') &&
+          document.activeElement.tagName !== 'INPUT'
+        ) {
+          event.preventDefault();
+          document.activeElement.click();
+        } else if (event.key === 'Escape') {
+          els.searchInput.blur();
+        }
+      });
+
+      els.searchForm.onsubmit = runManualSearch;
+      els.searchInput.addEventListener('input', () => {
+        els.searchButton.disabled = state.searchBusy || !state.backendReady || !els.searchInput.value.trim();
+      });
+
+      wireBridge();
+      checkBackendHealth();
+      setInterval(checkBackendHealth, 2500);
+    </script>
+  </body>
+</html>

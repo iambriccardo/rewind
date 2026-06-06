@@ -7,6 +7,7 @@ Local MVP for a real-time rewind memory agent. The backend accepts a live device
 - Fastify TypeScript backend at `http://localhost:8787`
 - WebSocket route at `/v1/live`
 - Browser phone simulator served separately with `npm run web`
+- Meta Ray-Ban Display web simulator served at `http://localhost:8788/glasses.html`
 - Supabase migrations for rewind events and rewind frames
 - `pgvector` + HNSW search RPC for combined embedding + metadata/full-text filtering
 - Product-level Rewind protocol messages visible in the simulator
@@ -27,6 +28,7 @@ In practice: clients send frame capture times in UTC, the backend normalizes acc
 ```txt
 apps/backend/   Fastify API, Gemini Live agent loop, Supabase repository, Dockerfile
 apps/web/       Browser phone simulator and local ephemeral device-frame store UI
+apps/glasses/   Meta Ray-Ban Display web UI prototype
 apps/ios/       Native iOS app project
 docs/           Client protocol and implementer documentation
 scripts/        Root-level local, Docker, and web runner scripts
@@ -57,6 +59,8 @@ Open:
 
 ```txt
 http://localhost:8788/phone.html
+http://localhost:8788/glasses.html
+http://localhost:8788/glasses-sim.html
 ```
 
 `npm run docker:backend` runs the backend in Docker against local Supabase. The runner starts or reuses the Supabase CLI local stack, reads its service-role key, and injects container-safe connection values.
@@ -108,7 +112,7 @@ npm run docker:local
 
 The runner starts the Supabase CLI's local Docker stack if needed, reads the local service-role key, and points the app container at `host.docker.internal:54321`.
 
-The phone app reads browser-safe config from `.env.web`:
+The phone and glasses web apps read browser-safe config from `.env.web`:
 
 ```bash
 WEB_PORT=8788
@@ -134,6 +138,8 @@ The standalone phone simulator writes captured JPEG frames to `WEB_FRAME_STORE_P
 ```bash
 rm -rf .data/device-frames
 ```
+
+The glasses simulator uses the same local frame store and result compiler as the phone search playback. It does not show camera video; it renders source text, the top ranked memory, and animated cached frames for that memory. `glasses-sim.html` wraps the HUD over a simulated or webcam world view so black behaves like transparent glass. Live search events from `phone.html` are mirrored to `glasses.html` through browser `BroadcastChannel`, and the glasses page also has a manual search box for desktop testing. More details are in [docs/meta-rayban-display.md](docs/meta-rayban-display.md).
 
 Try:
 

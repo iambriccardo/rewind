@@ -417,6 +417,7 @@
     </main>
     <canvas id="canvas" width="640" height="480" hidden></canvas>
     <script src="/env.js"></script>
+    <script src="/rewind-frame-cache.js"></script>
     <script>
       const DEFAULT_REALTIME_IMAGE_INTERVAL_SECONDS = 1;
       const MIN_REALTIME_IMAGE_INTERVAL_SECONDS = 1;
@@ -503,6 +504,17 @@
         els.tools.textContent = line + els.tools.textContent;
       }
 
+      function broadcastGlasses(message) {
+        const payload = { ...message, broadcast_at: Date.now() };
+        try {
+          localStorage.setItem('rewind_glasses_last_event', JSON.stringify(payload));
+          const channel = new BroadcastChannel('rewind-glasses');
+          channel.postMessage(payload);
+          channel.close();
+        } catch {
+        }
+      }
+
       function setStatus(message, stateName = '') {
         els.status.textContent = message;
         if (stateName) els.status.dataset.state = stateName;
@@ -536,7 +548,7 @@
         els.results.appendChild(card);
       }
 
-      function renderSearchResults(message) {
+      async function renderSearchResults(message) {
         els.results.innerHTML = '';
         if (!message.results.length) {
           const empty = document.createElement('div');
@@ -559,16 +571,23 @@
             description: result.description,
             meta,
             active: index === 0,
-            onClick: () => {
+            onClick: async () => {
               for (const item of els.results.querySelectorAll('.memory-card')) item.classList.remove('active');
               card.classList.add('active');
-              renderTimeline(result.frame_refs || []);
+              renderTimeline(await compileResultFrames(result));
               setSummary(result.title, result.description, 'ok');
             }
           });
           els.results.appendChild(card);
         });
-        renderTimeline(message.results[0]?.frame_refs || []);
+        renderTimeline(await compileResultFrames(message.results[0]));
+      }
+
+      function compileResultFrames(result) {
+        return window.RewindFrameCache.compileResultFrames(result, {
+          assetResolver: (frameUuid) => state.assets.get(frameUuid),
+          onError: (error) => log('Frame window lookup failed', { error: error.message || String(error) })
+        });
       }
 
       function renderSearchStarted(message) {
@@ -1239,6 +1258,7 @@
             text: message.text,
             data_bytes_base64: message.data?.length
           });
+          if (message.modality === 'text' && message.text) broadcastGlasses(message);
           return;
         }
         if (message.type === 'rewind.search_started') {
@@ -1248,6 +1268,7 @@
           log('Search started', { query: message.query, text: message.text });
           setSummary('Searching', message.text || message.query, 'busy');
           renderSearchStarted(message);
+          broadcastGlasses(message);
           return;
         }
         if (message.type === 'rewind.search_results') {
@@ -1256,7 +1277,8 @@
           protocolLog('rewind.search_results', message);
           log('Search results', { query: message.query, results: message.results.length });
           setSummary('Search complete', `${message.results.length} result${message.results.length === 1 ? '' : 's'} for "${message.query}".`, 'ok');
-          renderSearchResults(message);
+          await renderSearchResults(message);
+          broadcastGlasses(message);
           return;
         }
         if (message.type === 'error') {
@@ -1389,11 +1411,9 @@
         els.player.innerHTML = '';
         els.playbackInfo.innerHTML = '';
         els.frameList.innerHTML = '';
-        const orderedRefs = [...frameRefs].sort((a, b) => {
-          const aTime = Date.parse(a.captured_at || '') || Number(a.offset_ms ?? 0);
-          const bTime = Date.parse(b.captured_at || '') || Number(b.offset_ms ?? 0);
-          return aTime - bTime;
-        }).map(normalizeFrameRef);
+        const orderedRefs = window.RewindFrameCache.compileFrameRefs(frameRefs, {
+          assetResolver: (frameUuid) => state.assets.get(frameUuid)
+        });
         if (!orderedRefs.length) {
           const empty = document.createElement('div');
           empty.className = 'empty';
@@ -1450,13 +1470,9 @@
       }
 
       function normalizeFrameRef(ref) {
-        const frameUuid = ref.device_frame_uuid || ref.uuid;
-        const frame = state.assets.get(frameUuid);
-        return {
-          ...ref,
-          device_frame_uuid: frameUuid,
-          src: frame?.dataUrl || deviceFrameImageUrl(frameUuid)
-        };
+        return window.RewindFrameCache.normalizeFrameRef(ref, {
+          assetResolver: (frameUuid) => state.assets.get(frameUuid)
+        });
       }
 
       function showPlaybackFrame(index, immediate) {
@@ -1507,7 +1523,7 @@
       }
 
       function deviceFrameImageUrl(deviceFrameUuid) {
-        return `/device/frames/${encodeURIComponent(deviceFrameUuid)}/image`;
+        return window.RewindFrameCache.deviceFrameImageUrl(deviceFrameUuid);
       }
 
       async function runManualSearch(event) {
@@ -1524,7 +1540,15 @@
 
         state.searchBusy = true;
         updateStreamingControls();
-        setSummary('Searching', query, 'busy');
+        const searchStarted = {
+          type: 'rewind.search_started',
+          request_id: 'manual-http-search',
+          query,
+          text: `Searching your rewinds for "${query}"...`
+        };
+        setSummary('Searching', searchStarted.text, 'busy');
+        renderSearchStarted(searchStarted);
+        broadcastGlasses(searchStarted);
         try {
           const response = await fetch(backendHttpUrl('/v1/rewinds/search'), {
             method: 'POST',
@@ -1544,7 +1568,8 @@
           protocolLog('http.rewind.search', result);
           log('Manual search results', { query: result.query, results: result.results?.length ?? 0 });
           setSummary('Search complete', `${result.results.length} result${result.results.length === 1 ? '' : 's'} for "${result.query}".`, 'ok');
-          renderSearchResults(result);
+          await renderSearchResults(result);
+          broadcastGlasses({ type: 'rewind.search_results', ...result });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           setSummary('Search failed', message, 'error');
