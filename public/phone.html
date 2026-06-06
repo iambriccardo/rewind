@@ -383,7 +383,9 @@
       const MIN_REALTIME_IMAGE_INTERVAL_SECONDS = 1;
       const MAX_REALTIME_IMAGE_INTERVAL_SECONDS = 60;
       const LOCAL_FRAME_CAPTURE_INTERVAL_MS = 1000;
-      const FRAME_BUFFER_SECONDS = 30;
+      const FRAME_BUFFER_DURATION_MS = 60_000;
+      const DEFAULT_REWIND_CAPTURE_DURATION_SECONDS = 8;
+      const FRAME_BUFFER_MAX_FRAMES = Math.ceil(FRAME_BUFFER_DURATION_MS / LOCAL_FRAME_CAPTURE_INTERVAL_MS);
       const MAX_FRAME_EDGE_PX = 384;
       const FRAME_JPEG_QUALITY = 0.62;
       const AUDIO_SAMPLE_RATE = 16000;
@@ -396,6 +398,7 @@
 
       const state = {
         ws: null,
+        connectPromise: null,
         sessionId: null,
         buffer: [],
         assets: new Map(),
@@ -629,6 +632,37 @@
         return new URL(path, webConfig.BACKEND_URL || DEFAULT_BACKEND_URL).toString();
       }
 
+      function sessionHelloMessage() {
+        return {
+          type: 'session.hello',
+          protocol_version: 1,
+          timestamp: new Date().toISOString(),
+          device: {
+            id: webConfig.DEV_DEVICE_ID || 'dev-phone',
+            kind: 'web-demo',
+            label: 'Rewind phone simulator'
+          },
+          buffers: {
+            rewind: {
+              duration_ms: FRAME_BUFFER_DURATION_MS,
+              frame_interval_ms: LOCAL_FRAME_CAPTURE_INTERVAL_MS,
+              max_frames: FRAME_BUFFER_MAX_FRAMES
+            },
+            realtime: {
+              image_interval_ms: currentFrameIntervalMs(),
+              audio_chunk_ms: AUDIO_CHUNK_MS,
+              audio_sample_rate_hz: AUDIO_SAMPLE_RATE
+            }
+          },
+          capabilities: {
+            out_of_band_rewind_upload: true,
+            local_frame_store: true,
+            image_upload_for_embedding: true,
+            manual_search: true
+          }
+        };
+      }
+
       function setBackendAvailability(ready, detail = '') {
         state.backendReady = ready;
         if (!ready) {
@@ -679,35 +713,48 @@
         if (!state.backendReady) {
           throw new Error('Backend is not connected. Start the backend before streaming.');
         }
-        if (state.ws?.readyState === WebSocket.OPEN) return Promise.resolve();
-        if (state.ws?.readyState === WebSocket.CONNECTING) {
-          return new Promise((resolve, reject) => {
-            state.ws.addEventListener('open', resolve, { once: true });
-            state.ws.addEventListener('error', reject, { once: true });
-          });
-        }
+        if (state.ws?.readyState === WebSocket.OPEN && state.sessionId) return Promise.resolve();
+        if (state.connectPromise) return state.connectPromise;
+        state.sessionId = null;
         state.ws = new WebSocket(wsUrl());
-        const ready = new Promise((resolve, reject) => {
-          state.ws.addEventListener('open', resolve, { once: true });
-          state.ws.addEventListener('error', reject, { once: true });
+        let rejectReady = null;
+        state.connectPromise = new Promise((resolve, reject) => {
+          rejectReady = reject;
+          state.ws.onopen = () => {
+            setStatus('Realtime handshaking', 'checking');
+            log('WebSocket connected');
+            sendSessionHello();
+            updateStreamingControls();
+          };
+          state.ws.onmessage = (event) => {
+            const message = JSON.parse(event.data);
+            handleServerMessage(message);
+            if (message.type === 'session.ready') {
+              state.connectPromise = null;
+              resolve();
+            }
+          };
+          state.ws.onerror = () => {
+            log('WebSocket error');
+            state.connectPromise = null;
+            checkBackendHealth();
+            reject(new Error('WebSocket error'));
+          };
         });
-        state.ws.onopen = () => {
-          setStatus('Realtime connected', 'ready');
-          log('WebSocket connected');
-          updateStreamingControls();
-        };
         state.ws.onclose = () => {
           if (state.streaming) forceStopStreaming('Realtime socket disconnected.');
+          if (state.connectPromise && rejectReady) rejectReady(new Error('Realtime socket disconnected during handshake.'));
+          state.sessionId = null;
+          state.connectPromise = null;
           setStatus(state.backendReady ? 'Realtime disconnected. Streaming can restart.' : 'Backend disconnected.', state.backendReady ? 'ready' : 'offline');
           log('WebSocket disconnected');
           updateStreamingControls();
         };
-        state.ws.onerror = () => {
-          log('WebSocket error');
-          checkBackendHealth();
-        };
-        state.ws.onmessage = (event) => handleServerMessage(JSON.parse(event.data));
-        return ready;
+        return state.connectPromise;
+      }
+
+      function sendSessionHello() {
+        send(sessionHelloMessage());
       }
 
       async function startStreaming() {
@@ -846,7 +893,7 @@
         };
         state.buffer.push(frame);
         state.assets.set(frame.uuid, frame);
-        state.buffer = state.buffer.slice(-FRAME_BUFFER_SECONDS);
+        state.buffer = state.buffer.slice(-FRAME_BUFFER_MAX_FRAMES);
         void persistFrame(frame);
         return frame;
       }
@@ -1072,8 +1119,9 @@
       async function captureAndUploadRewind(request) {
         try {
           if (!state.buffer.length) captureFrame();
-          const durationSeconds = Number(request.rewind_duration_seconds || 6);
-          const frames = state.buffer.slice(-Math.max(1, Math.min(FRAME_BUFFER_SECONDS, durationSeconds)));
+          const requestedDurationMs = Math.max(1, Number(request.rewind_duration_seconds || DEFAULT_REWIND_CAPTURE_DURATION_SECONDS)) * 1000;
+          const durationMs = Math.min(FRAME_BUFFER_DURATION_MS, requestedDurationMs);
+          const frames = selectBufferedFrames(durationMs);
           await persistFrames(frames);
           renderSavedMemory(request, frames.length, 'uploading');
           const upload = {
@@ -1096,7 +1144,7 @@
               return payload;
             }),
             metadata: {
-              rewind_duration_seconds: durationSeconds,
+              rewind_duration_ms: durationMs,
               frame_embedding_mode: request.frame_embedding_mode || 'text_only'
             }
           };
@@ -1127,6 +1175,21 @@
             error: error.message || String(error)
           });
         }
+      }
+
+      function selectBufferedFrames(durationMs) {
+        const fallback = state.buffer.at(-1);
+        if (!state.buffer.length) return fallback ? [fallback] : [];
+        const lastTimestamp = Date.parse(state.buffer.at(-1).capturedAt);
+        if (!Number.isFinite(lastTimestamp)) {
+          return state.buffer.slice(-Math.max(1, Math.ceil(durationMs / LOCAL_FRAME_CAPTURE_INTERVAL_MS)));
+        }
+        const cutoff = lastTimestamp - durationMs;
+        const selected = state.buffer.filter((frame) => {
+          const captured = Date.parse(frame.capturedAt);
+          return Number.isFinite(captured) && captured >= cutoff;
+        });
+        return selected.length ? selected : [state.buffer.at(-1)];
       }
 
       function renderTimeline(frameRefs) {

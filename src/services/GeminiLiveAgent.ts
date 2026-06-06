@@ -11,7 +11,7 @@ import {
   type Tool
 } from '@google/genai';
 import { config } from '../config.js';
-import type { ClientMessage, JsonObject, ToolCall } from '../types.js';
+import type { ClientMessage, JsonObject, SessionHello, ToolCall } from '../types.js';
 
 const SUPPORTED_TOOLS = ['create_rewind', 'search_rewinds'] as const;
 type SupportedToolName = (typeof SUPPORTED_TOOLS)[number];
@@ -40,7 +40,7 @@ export class GeminiLiveAgent {
   private clientSeq = 0;
   private readonly maxQueuedInputs = 80;
 
-  constructor() {
+  constructor(private readonly clientSession: NormalizedClientSession) {
     if (!config.MODEL_API_KEY) {
       throw new Error('MODEL_API_KEY is required.');
     }
@@ -76,8 +76,9 @@ export class GeminiLiveAgent {
             rewind_duration_seconds: {
               type: 'integer',
               minimum: 1,
-              maximum: 60,
-              description: 'How many seconds of the phone rolling buffer should be preserved for this rewind.'
+              maximum: this.clientSession.maxRewindDurationSeconds,
+              description:
+                'How many seconds of the phone rolling buffer should be preserved for this rewind. Must be at most the client buffer capacity.'
             }
           },
           required: ['title', 'description', 'entities', 'rewind_duration_seconds']
@@ -306,7 +307,7 @@ export class GeminiLiveAgent {
       temperature: 0.2,
       maxOutputTokens: 256,
       mediaResolution: MediaResolution.MEDIA_RESOLUTION_LOW,
-      systemInstruction: systemInstruction(),
+      systemInstruction: systemInstruction(this.clientSession),
       tools: this.getGeminiTools(),
       realtimeInputConfig: {
         turnCoverage: TurnCoverage.TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO,
@@ -328,6 +329,12 @@ export class GeminiLiveAgent {
   }
 }
 
+export type NormalizedClientSession = {
+  hello: SessionHello;
+  bufferDurationMs: number;
+  maxRewindDurationSeconds: number;
+};
+
 function normalizeFunctionCalls(calls: FunctionCall[]): ToolCall[] {
   return calls
     .filter((call): call is FunctionCall & { name: SupportedToolName } => Boolean(call.name) && SUPPORTED_TOOLS.includes(call.name as SupportedToolName))
@@ -342,7 +349,9 @@ function usesNativeAudioModel(model: string): boolean {
   return model.includes('native-audio');
 }
 
-function systemInstruction(): string {
+function systemInstruction(clientSession: NormalizedClientSession): string {
+  const maxSeconds = clientSession.maxRewindDurationSeconds;
+  const bufferMs = clientSession.bufferDurationMs;
   return [
     '# Role',
     '- You are Rewind, a quiet real-time memory agent behind a trusted phone client.',
@@ -355,7 +364,10 @@ function systemInstruction(): string {
     '',
     '# Create Rewind',
     '- Call create_rewind for requests like: "remember this", "save that I did this", "remember where I put this", "remember where I left X", "capture this", "save this moment", or similar phrasing.',
-    '- ALWAYS include rewind_duration_seconds. Use 5-10 seconds by default. Use a longer duration only when the user asks for more context.',
+    `- The trusted phone reports a rolling rewind buffer of ${bufferMs} ms, so rewind_duration_seconds MUST be between 1 and ${maxSeconds}. Never request more than the available buffer.`,
+    '- ALWAYS include rewind_duration_seconds. Choose the smallest useful replay window, not a generic long clip.',
+    '- Duration guidance: a quick object/location memory usually needs 4-8 seconds; an object shown briefly for about 2 seconds should use about 3-5 seconds; a short action should use 6-12 seconds; use a longer duration only when the user explicitly asks for more context or the relevant action visibly spans longer.',
+    '- If uncertain, prefer a shorter window that still contains the object/action and immediate context. Do not request 20 seconds for a simple static object memory.',
     '- Infer the memory from ALL RECENT CONTEXT: the user words, audio history, visible camera frames, visible text, object positions, places, surfaces, and actions.',
     '- If the user says "this", "that", "it", "here", or "where I put this", resolve the referent from the camera/video context.',
     '- entities is REQUIRED. Include concrete searchable labels: objects, people, places, surfaces, containers, visible text/brands, and actions. Use short noun phrases. Avoid generic words like thing, stuff, object, moment, memory.',

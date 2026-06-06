@@ -12,11 +12,12 @@ import type {
   RewindFrame,
   RewindSaveRequest,
   RewindSearchResults,
+  SessionHello,
   ServerMessage,
   ToolCall
 } from './types.js';
 import { EmbeddingService } from './services/EmbeddingService.js';
-import { GeminiLiveAgent } from './services/GeminiLiveAgent.js';
+import { GeminiLiveAgent, type NormalizedClientSession } from './services/GeminiLiveAgent.js';
 import { createRepository } from './services/RewindRepository.js';
 import { SupervisionLogger } from './services/SupervisionLogger.js';
 import { ToolRouter } from './services/ToolRouter.js';
@@ -126,76 +127,238 @@ app.post<{ Params: { id: string }; Body: RewindCommitRequest }>('/v1/rewinds/:id
 app.get('/v1/live', { websocket: true }, async (socket, request) => {
   const userId = getUserId(request.headers, request.query);
   const deviceId = getDeviceId(request.headers, request.query);
-  let agent: GeminiLiveAgent;
-  try {
-    agent = new GeminiLiveAgent();
-  } catch (error) {
-    sendJson(socket as WebSocket, { type: 'error', error: error instanceof Error ? error.message : String(error) });
-    socket.close();
-    return;
-  }
-  const session = await repository.createSession({
-    user_id: userId,
-    device_id: deviceId,
-    model: agent.model,
-    metadata: {
-      tools: agent.getToolDeclarations(),
-      user_agent: request.headers['user-agent'] ?? null
-    }
-  });
-
+  const ws = socket as WebSocket;
+  let liveContext:
+    | {
+        session_id: string;
+        agent: GeminiLiveAgent;
+        client_session: NormalizedClientSession;
+      }
+    | undefined;
+  let initializing: Promise<void> | undefined;
   let lastUserText = '';
   socket.on('message', async (raw) => {
     try {
       const message = JSON.parse(raw.toString()) as ClientMessage;
+      if (message.type === 'session.hello') {
+        if (liveContext || initializing) {
+          sendJson(ws, { type: 'error', error: 'session.hello has already been accepted.' });
+          return;
+        }
+        initializing = initializeLiveSession(ws, {
+          hello: message,
+          user_id: userId,
+          device_id: deviceId,
+          user_agent: request.headers['user-agent'] ?? null,
+          get_last_user_text: () => lastUserText
+        }).finally(() => {
+          initializing = undefined;
+        });
+        await initializing;
+        return;
+      }
+      if (initializing) await initializing;
+      if (!liveContext) {
+        sendJson(ws, { type: 'error', error: 'session.hello is required before user.text or user.media.' });
+        return;
+      }
       if (message.type === 'user.text') lastUserText = message.text;
-      await handleClientMessage(socket as WebSocket, {
+      await handleClientMessage(ws, {
         message,
-        session_id: session.id,
+        session_id: liveContext.session_id,
         user_id: userId,
         device_id: deviceId,
-        agent,
-        last_user_text: lastUserText
+        agent: liveContext.agent,
+        last_user_text: lastUserText,
+        max_rewind_duration_seconds: liveContext.client_session.maxRewindDurationSeconds
       });
     } catch (error) {
       app.log.error({ error }, 'websocket message failed');
-      sendJson(socket as WebSocket, { type: 'error', error: error instanceof Error ? error.message : String(error) });
+      sendJson(ws, { type: 'error', error: error instanceof Error ? error.message : String(error) });
     }
   });
 
   socket.once('close', async () => {
-    agent.close();
-    await repository.endSession(session.id).catch((error) => app.log.error(error));
+    liveContext?.agent.close();
+    if (liveContext) await repository.endSession(liveContext.session_id).catch((error) => app.log.error(error));
   });
+  sendJson(ws, { type: 'agent.live_state', state: 'transport_open', payload: { handshake_required: true } });
 
-  let readySent = false;
-  const sendReady = () => {
-    if (readySent) return;
-    readySent = true;
-    sendJson(socket as WebSocket, { type: 'session.ready', session_id: session.id, user_id: userId, device_id: deviceId });
-  };
-  await agent
-    .connectLive({
+  async function initializeLiveSession(
+    liveSocket: WebSocket,
+    input: {
+      hello: SessionHello;
+      user_id: string;
+      device_id: string;
+      user_agent: unknown;
+      get_last_user_text: () => string;
+    }
+  ): Promise<void> {
+    const clientSession = normalizeSessionHello(input.hello, input.device_id);
+    let agent: GeminiLiveAgent;
+    try {
+      agent = new GeminiLiveAgent(clientSession);
+    } catch (error) {
+      sendJson(liveSocket, { type: 'error', error: error instanceof Error ? error.message : String(error) });
+      liveSocket.close();
+      return;
+    }
+    const session = await repository.createSession({
+      user_id: input.user_id,
+      device_id: input.device_id,
+      model: agent.model,
+      metadata: {
+        tools: agent.getToolDeclarations(),
+        user_agent: input.user_agent,
+        client_session: clientSession.hello,
+        max_rewind_duration_seconds: clientSession.maxRewindDurationSeconds
+      }
+    });
+    liveContext = {
+      session_id: session.id,
+      agent,
+      client_session: clientSession
+    };
+    await logger.event({
+      session_id: session.id,
+      user_id: input.user_id,
+      type: input.hello.type,
+      payload: clientSession.hello as unknown as JsonObject
+    });
+
+    let readySent = false;
+    const sendReady = () => {
+      if (readySent) return;
+      readySent = true;
+      sendJson(liveSocket, {
+        type: 'session.ready',
+        session_id: session.id,
+        user_id: input.user_id,
+        device_id: input.device_id,
+        max_rewind_duration_seconds: clientSession.maxRewindDurationSeconds
+      });
+    };
+    await agent.connectLive({
       onState: (state, payload) => {
-        sendJson(socket as WebSocket, { type: 'agent.live_state', state, payload });
+        sendJson(liveSocket, { type: 'agent.live_state', state, payload });
         if (state === 'connected') sendReady();
       },
-      onText: (text) => sendJson(socket as WebSocket, { type: 'agent.media', modality: 'text', text }),
-      onAudio: (data, mimeType) => sendJson(socket as WebSocket, { type: 'agent.media', modality: 'audio', mime_type: mimeType, data }),
+      onText: (text) => sendJson(liveSocket, { type: 'agent.media', modality: 'text', text }),
+      onAudio: (data, mimeType) => sendJson(liveSocket, { type: 'agent.media', modality: 'audio', mime_type: mimeType, data }),
       onToolCalls: async (toolCalls) => {
-        await runToolCalls(socket as WebSocket, { session_id: session.id, user_id: userId, device_id: deviceId, last_user_text: lastUserText }, agent, toolCalls);
+        await runToolCalls(
+          liveSocket,
+          {
+            session_id: session.id,
+            user_id: input.user_id,
+            device_id: input.device_id,
+            last_user_text: input.get_last_user_text(),
+            max_rewind_duration_seconds: clientSession.maxRewindDurationSeconds
+          },
+          agent,
+          toolCalls
+        );
       }
-    })
-    .catch((error) => {
+    }).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       app.log.error({ error }, 'Live model connection failed');
-      sendJson(socket as WebSocket, { type: 'agent.live_state', state: 'error', payload: { error: message } });
+      sendJson(liveSocket, { type: 'agent.live_state', state: 'error', payload: { error: message } });
     });
+  }
 });
+
+function normalizeSessionHello(message: SessionHello, deviceId: string): NormalizedClientSession {
+  if (!message || typeof message !== 'object') {
+    throw new Error('session.hello must be an object.');
+  }
+  if (message.protocol_version !== 1) {
+    throw new Error('session.hello protocol_version must be 1.');
+  }
+  const rewind = message.buffers?.rewind;
+  if (!rewind || typeof rewind !== 'object') {
+    throw new Error('session.hello buffers.rewind is required.');
+  }
+  const bufferDurationMs = boundedInteger(rewind.duration_ms, {
+    name: 'buffers.rewind.duration_ms',
+    min: 1,
+    max: 300_000
+  });
+  const frameIntervalMs =
+    rewind.frame_interval_ms === undefined
+      ? undefined
+      : boundedInteger(rewind.frame_interval_ms, {
+          name: 'buffers.rewind.frame_interval_ms',
+          min: 1,
+          max: 60_000
+        });
+  const maxFrames =
+    rewind.max_frames === undefined
+      ? undefined
+      : boundedInteger(rewind.max_frames, {
+          name: 'buffers.rewind.max_frames',
+          min: 1,
+          max: 10_000
+        });
+  const realtime = message.buffers.realtime;
+  const normalized: SessionHello = {
+    type: 'session.hello',
+    protocol_version: 1,
+    timestamp: typeof message.timestamp === 'string' ? message.timestamp : new Date().toISOString(),
+    device: {
+      id: typeof message.device?.id === 'string' ? message.device.id : deviceId,
+      kind: typeof message.device?.kind === 'string' ? message.device.kind : 'unknown',
+      label: typeof message.device?.label === 'string' ? message.device.label : undefined
+    },
+    buffers: {
+      rewind: {
+        duration_ms: bufferDurationMs,
+        frame_interval_ms: frameIntervalMs,
+        max_frames: maxFrames
+      },
+      realtime: realtime
+        ? {
+            image_interval_ms:
+              realtime.image_interval_ms === undefined
+                ? undefined
+                : boundedInteger(realtime.image_interval_ms, { name: 'buffers.realtime.image_interval_ms', min: 1, max: 60_000 }),
+            audio_chunk_ms:
+              realtime.audio_chunk_ms === undefined
+                ? undefined
+                : boundedInteger(realtime.audio_chunk_ms, { name: 'buffers.realtime.audio_chunk_ms', min: 1, max: 10_000 }),
+            audio_sample_rate_hz:
+              realtime.audio_sample_rate_hz === undefined
+                ? undefined
+                : boundedInteger(realtime.audio_sample_rate_hz, { name: 'buffers.realtime.audio_sample_rate_hz', min: 1, max: 192_000 })
+          }
+        : undefined
+    },
+    capabilities: message.capabilities && typeof message.capabilities === 'object' ? message.capabilities : {}
+  };
+  return {
+    hello: normalized,
+    bufferDurationMs,
+    maxRewindDurationSeconds: Math.max(1, Math.ceil(bufferDurationMs / 1000))
+  };
+}
+
+function boundedInteger(value: unknown, options: { name: string; min: number; max: number }): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < options.min || value > options.max) {
+    throw new Error(`${options.name} must be an integer between ${options.min} and ${options.max}.`);
+  }
+  return value;
+}
 
 async function handleClientMessage(
   socket: WebSocket,
-  input: { message: ClientMessage; session_id: string; user_id: string; device_id: string; agent: GeminiLiveAgent; last_user_text: string }
+  input: {
+    message: Exclude<ClientMessage, { type: 'session.hello' }>;
+    session_id: string;
+    user_id: string;
+    device_id: string;
+    agent: GeminiLiveAgent;
+    last_user_text: string;
+    max_rewind_duration_seconds: number;
+  }
 ): Promise<void> {
   await logger.event({
     session_id: input.session_id,
@@ -343,7 +506,7 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper:
 
 async function runToolCalls(
   socket: WebSocket,
-  context: { session_id: string; user_id: string; device_id: string; last_user_text?: string },
+  context: { session_id: string; user_id: string; device_id: string; last_user_text?: string; max_rewind_duration_seconds?: number },
   agent: GeminiLiveAgent,
   toolCalls: ToolCall[]
 ): Promise<void> {

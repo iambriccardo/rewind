@@ -73,6 +73,30 @@ export type ToolCall = {
   args: JsonObject;
 };
 
+export type SessionHello = {
+  type: 'session.hello';
+  protocol_version: 1;
+  timestamp?: string;
+  device?: {
+    id?: string;
+    kind?: string;
+    label?: string;
+  };
+  buffers: {
+    rewind: {
+      duration_ms: number;
+      frame_interval_ms?: number;
+      max_frames?: number;
+    };
+    realtime?: {
+      image_interval_ms?: number;
+      audio_chunk_ms?: number;
+      audio_sample_rate_hz?: number;
+    };
+  };
+  capabilities?: JsonObject;
+};
+
 export type RewindCommitRequest = {
   event_id: string;
   local_asset_id?: string;
@@ -94,6 +118,7 @@ export type RewindCommitRequest = {
 };
 
 export type ClientMessage =
+  | SessionHello
   | { type: 'user.text'; text: string }
   | { type: 'user.media'; modality: 'audio' | 'video' | 'image'; mime_type: string; data: string; seq?: number; timestamp?: string }
   | { type: 'user.media_end'; modality: 'audio' | 'video' | 'image' };
@@ -144,7 +169,7 @@ export type RewindSearchResults = {
 };
 
 export type ServerMessage =
-  | { type: 'session.ready'; session_id: string; user_id: string; device_id: string }
+  | { type: 'session.ready'; session_id: string; user_id: string; device_id: string; max_rewind_duration_seconds?: number }
   | { type: 'agent.message'; text: string; payload?: JsonObject }
   | { type: 'agent.live_state'; state: 'connecting' | 'transport_open' | 'connected' | 'closed' | 'error'; payload?: JsonObject }
   | { type: 'agent.media'; modality: 'audio' | 'text'; mime_type?: string; data?: string; text?: string; seq?: number }

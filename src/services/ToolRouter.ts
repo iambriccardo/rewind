@@ -32,9 +32,10 @@ const CreateRewindSchema = z.object({
   description: z.string().min(1).max(4000),
   entities: z.array(z.string()).default([]),
   location_hint: z.string().optional(),
-  rewind_duration_seconds: z.number().int().positive().max(60).optional(),
-  capture_window_ms: z.number().int().positive().max(60_000).optional()
+  rewind_duration_seconds: z.number().int().positive().max(300).optional(),
+  capture_window_ms: z.number().int().positive().max(300_000).optional()
 });
+const DEFAULT_REWIND_CAPTURE_DURATION_SECONDS = 8;
 
 const SearchRewindsSchema = z.object({
   query: z.string().min(1).max(1000),
@@ -52,7 +53,7 @@ export class ToolRouter {
     private readonly logger: SupervisionLogger
   ) {}
 
-  async route(input: { session_id: string; user_id: string; device_id: string; toolCall: ToolCall }): Promise<JsonObject> {
+  async route(input: { session_id: string; user_id: string; device_id: string; toolCall: ToolCall; max_rewind_duration_seconds?: number }): Promise<JsonObject> {
     const started = Date.now();
     try {
       const result = await this.execute(input);
@@ -83,7 +84,7 @@ export class ToolRouter {
     }
   }
 
-  private async execute(input: { session_id: string; user_id: string; device_id: string; toolCall: ToolCall }): Promise<JsonObject> {
+  private async execute(input: { session_id: string; user_id: string; device_id: string; toolCall: ToolCall; max_rewind_duration_seconds?: number }): Promise<JsonObject> {
     switch (input.toolCall.name) {
       case 'create_rewind':
         return this.createRewind(input);
@@ -98,9 +99,12 @@ export class ToolRouter {
     return this.buildSearchResults(input.user_id, input.args);
   }
 
-  private async createRewind(input: { session_id: string; user_id: string; device_id: string; toolCall: ToolCall }): Promise<JsonObject> {
+  private async createRewind(input: { session_id: string; user_id: string; device_id: string; toolCall: ToolCall; max_rewind_duration_seconds?: number }): Promise<JsonObject> {
     const args = CreateRewindSchema.parse(input.toolCall.args);
-    const rewindDurationSeconds = args.rewind_duration_seconds ?? Math.ceil((args.capture_window_ms ?? 6000) / 1000);
+    const requestedDurationSeconds =
+      args.rewind_duration_seconds ?? Math.ceil((args.capture_window_ms ?? DEFAULT_REWIND_CAPTURE_DURATION_SECONDS * 1000) / 1000);
+    const maxDurationSeconds = input.max_rewind_duration_seconds ?? 60;
+    const rewindDurationSeconds = Math.max(1, Math.min(maxDurationSeconds, requestedDurationSeconds));
     const embeddingText = this.embeddings.buildEventEmbeddingText({
       title: args.title,
       description: args.description,

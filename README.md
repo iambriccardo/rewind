@@ -14,6 +14,7 @@ Local MVP for a real-time rewind memory agent. The backend accepts a live device
 - Gemini Live protocol support for text, image/video frames, audio chunks, and internal backend tool handling
 - Gemini embeddings using `gemini-embedding-2` with 768 dimensions by default
 - Optional frame embedding mode that embeds selected frame images with `gemini-embedding-2` and stores frame vectors for pgvector search
+- Client implementer reference for HTTP endpoints and the live WebSocket state machine in [docs/client-protocol.md](docs/client-protocol.md)
 
 ## Quick Start
 
@@ -116,13 +117,52 @@ The simulator also has:
 - `Mute Mic`: disables microphone tracks without closing the WebSocket.
 - `Frame every`: controls how often camera frames are forwarded to Gemini Live.
 
-The demo keeps realtime media cheap by default: camera frames are resized to a 384px max edge, encoded as moderate-quality JPEGs, and forwarded to Gemini Live at 1 FPS by default. The `Frame every` control can raise that interval up to 60 seconds to reduce Live API media tokens. The rolling frame buffer still captures locally at 1 FPS for 30 seconds, so rewind commits keep useful temporal coverage even when realtime model observation is throttled. A rewind indexes at most 12 frame embeddings. Audio is downsampled in the browser to 16 kHz little-endian PCM and sent in 250 ms chunks with `audio/pcm;rate=16000`.
+The demo keeps realtime media cheap by default: camera frames are resized to a 384px max edge, encoded as moderate-quality JPEGs, and forwarded to Gemini Live at 1 FPS by default. The `Frame every` control can raise that interval up to 60 seconds to reduce Live API media tokens. The rolling frame buffer still captures locally at 1 FPS for 60 seconds, so rewind commits keep useful temporal coverage even when realtime model observation is throttled. If Gemini ever omits an explicit rewind duration, the app falls back to an 8-second capture window. A rewind indexes at most 12 frame embeddings. Audio is downsampled in the browser to 16 kHz little-endian PCM and sent in 250 ms chunks with `audio/pcm;rate=16000`.
 
 ## Client Protocol
 
 The WebSocket protocol is intentionally product-level. Gemini function calls are backend internals and are never forwarded to clients as tool calls.
 
+The full implementer contract for HTTP endpoints, WebSocket states, message schemas, upload behavior, and search responses lives in [docs/client-protocol.md](docs/client-protocol.md). Keep that document aligned with code when adding or changing client-visible protocol fields.
+
 Client to backend over `/v1/live`:
+
+First message after WebSocket open:
+
+```json
+{
+  "type": "session.hello",
+  "protocol_version": 1,
+  "timestamp": "2026-06-06T15:30:00.000Z",
+  "device": {
+    "id": "dev-phone",
+    "kind": "ios",
+    "label": "Riccardo phone"
+  },
+  "buffers": {
+    "rewind": {
+      "duration_ms": 60000,
+      "frame_interval_ms": 1000,
+      "max_frames": 60
+    },
+    "realtime": {
+      "image_interval_ms": 1000,
+      "audio_chunk_ms": 250,
+      "audio_sample_rate_hz": 16000
+    }
+  },
+  "capabilities": {
+    "out_of_band_rewind_upload": true,
+    "local_frame_store": true,
+    "image_upload_for_embedding": true,
+    "manual_search": true
+  }
+}
+```
+
+The backend uses `buffers.rewind.duration_ms` to configure the Gemini Live tool schema and prompt. `create_rewind.rewind_duration_seconds` is clamped to the available buffer, and the model is instructed to choose the smallest useful replay window.
+
+After `session.ready`, the client may stream text/media:
 
 ```json
 { "type": "user.text", "text": "remember where I left this" }
@@ -144,6 +184,16 @@ Client to backend over `/v1/live`:
 ```
 
 Backend to client over `/v1/live`:
+
+```json
+{
+  "type": "session.ready",
+  "session_id": "live-session-uuid",
+  "user_id": "00000000-0000-4000-8000-000000000001",
+  "device_id": "dev-phone",
+  "max_rewind_duration_seconds": 60
+}
+```
 
 ```json
 {
@@ -336,7 +386,7 @@ The agent prompt is intentionally passive and optimized for a realtime voice loo
 - It uses short, explicit sections and two narrow tools only.
 - Native audio sessions use Google Live `v1alpha` plus `proactivity.proactiveAudio=true`, so irrelevant background audio can be ignored.
 - Gemini server-side activity detection stays enabled, with low media resolution and audio/video turn coverage so recent video context is available when speech is vague.
-- `create_rewind` is only emitted after explicit save/remember intent. It must include `rewind_duration_seconds`, a concise title/description, and inferred `entities`.
+- `create_rewind` is only emitted after explicit save/remember intent. It must include `rewind_duration_seconds`, a concise title/description, and inferred `entities`; duration is bounded by `session.hello.buffers.rewind.duration_ms` and should be the smallest useful replay window.
 - Vague phrases such as `remember where I put this` should resolve `this` from recent camera/audio context. Entities should include concrete visible objects, surfaces, containers, places, readable labels/text, and actions when useful for search.
 
 ## Embedding Modes
