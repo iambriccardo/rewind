@@ -8,45 +8,204 @@
 import Foundation
 import OSLog
 
-/// Receives phone capture stream events in the same shape a backend uploader will consume later.
+/// Bridges phone capture into the Rewind client protocol.
 ///
-/// The current implementation intentionally does not upload or persist anything. It gives the
-/// phone capture flow a stable boundary for session lifecycle, video frame, and audio chunk events.
+/// `PhoneCaptureController` owns AVFoundation and produces media. This actor owns
+/// the backend-facing session lifecycle, realtime media messages, local rewind
+/// frame window, and out-of-band commit uploads.
 actor CaptureStreamEndpoint {
+    let events: AsyncStream<RewindProtocolEvent>
+
+    private let configuration: RewindConfiguration
+    private let client: RewindProtocolClient
+    private let frameBuffer: RollingFrameBuffer
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "app.vogelhaus.Rewind",
         category: "CaptureStreamEndpoint"
     )
 
     private var activeSessionID: UUID?
+    private var activeSession: CaptureStreamSession?
+    private var connectTask: Task<Void, Never>?
 
-    func startSession(_ session: CaptureStreamSession) {
-        activeSessionID = session.id
-        logger.info("Started capture stream session \(session.id.uuidString, privacy: .public)")
+    init(
+        configuration: RewindConfiguration = .defaultConfiguration,
+        client: RewindProtocolClient? = nil,
+        frameBuffer: RollingFrameBuffer = RollingFrameBuffer()
+    ) {
+        self.configuration = configuration
+        self.client = client ?? RewindProtocolClient(configuration: configuration)
+        self.frameBuffer = frameBuffer
+        self.events = self.client.events
     }
 
-    func receiveVideoFrame(_ frame: CaptureVideoFrame) {
+    func startSession(_ session: CaptureStreamSession) async {
+        activeSessionID = session.id
+        activeSession = session
+        connectTask?.cancel()
+        connectTask = Task { [weak self] in
+            await self?.connect(session)
+        }
+    }
+
+    func reconnectActiveSession() async {
+        guard let activeSession else {
+            return
+        }
+
+        connectTask?.cancel()
+        connectTask = Task { [weak self] in
+            await self?.connect(activeSession)
+        }
+    }
+
+    private func connect(_ session: CaptureStreamSession) async {
+        guard !Task.isCancelled else {
+            return
+        }
+
+        let hello = RewindSessionHello(
+            device: RewindSessionHello.Device(
+                id: configuration.deviceID,
+                kind: "ios"
+            ),
+            buffers: RewindSessionHello.Buffers(
+                rewind: RewindSessionHello.Buffers.Rewind(
+                    durationMs: session.rewindBufferDurationMilliseconds,
+                    frameIntervalMs: session.deviceFrameIntervalMilliseconds,
+                    maxFrames: session.rewindBufferMaximumFrames
+                )
+            ),
+            context: .current()
+        )
+
+        do {
+            try await client.connect(hello: hello)
+            guard activeSessionID == session.id else {
+                await client.disconnect()
+                return
+            }
+
+            logger.info("Started Rewind capture protocol session \(session.id.uuidString, privacy: .public)")
+        } catch {
+            guard !Task.isCancelled, activeSessionID == session.id else {
+                return
+            }
+
+            await client.reportFailure(error.localizedDescription, scope: .connection)
+            logger.error("Failed to connect Rewind protocol session: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    func receiveVideoFrame(_ frame: CaptureVideoFrame) async {
         guard activeSessionID == frame.sessionID else {
             logger.error("Dropped video frame for inactive capture session \(frame.sessionID.uuidString, privacy: .public)")
             return
         }
+
+        let bufferedFrame = RewindBufferedFrame(
+            id: frame.deviceFrameUUID,
+            capturedAt: frame.timestamp,
+            width: frame.width,
+            height: frame.height,
+            jpegData: frame.data
+        )
+        await frameBuffer.append(bufferedFrame)
+
+        do {
+            try await client.sendImageFrame(bufferedFrame)
+        } catch {
+            logger.error("Failed to stream image frame: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
-    func receiveAudioChunk(_ chunk: CaptureAudioChunk) {
+    func receiveAudioChunk(_ chunk: CaptureAudioChunk) async {
         guard activeSessionID == chunk.sessionID else {
             logger.error("Dropped audio chunk for inactive capture session \(chunk.sessionID.uuidString, privacy: .public)")
             return
         }
+
+        do {
+            try await client.sendAudioChunk(chunk)
+        } catch {
+            logger.error("Failed to stream audio chunk: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
-    func finishSession(id: UUID) {
+    func finishSession(id: UUID) async {
         guard activeSessionID == id else {
             logger.error("Ignored finish for inactive capture session \(id.uuidString, privacy: .public)")
             return
         }
 
         activeSessionID = nil
-        logger.info("Finished capture stream session \(id.uuidString, privacy: .public)")
+        activeSession = nil
+        connectTask?.cancel()
+        connectTask = nil
+        await frameBuffer.removeAll()
+        await client.disconnect()
+        logger.info("Finished Rewind capture protocol session \(id.uuidString, privacy: .public)")
+    }
+
+    func commit(_ request: RewindSaveRequest, location: RewindCapturedLocation?) async {
+        let window = captureWindow(for: request)
+        let frames = await frameBuffer.selectFrames(window: window)
+
+        do {
+            _ = try await client.commit(
+                saveRequest: request,
+                window: window,
+                frames: frames,
+                location: location
+            )
+        } catch {
+            await client.reportFailure(error.localizedDescription)
+            logger.error("Failed to commit rewind frames: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    func search(query: String) async {
+        do {
+            try await client.search(query: query)
+        } catch {
+            await client.reportFailure(error.localizedDescription)
+            logger.error("Failed to search rewinds: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    func sendText(_ text: String) async {
+        do {
+            try await client.sendText(text)
+        } catch {
+            await client.reportFailure(error.localizedDescription)
+            logger.error("Failed to send text prompt: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func captureWindow(for request: RewindSaveRequest) -> RewindCaptureWindow {
+        let maximumDurationMs = activeSession?.rewindBufferDurationMilliseconds ?? 60_000
+        let requestedDurationMs = request.captureDurationMs ?? max(1, request.rewindDurationSeconds) * 1_000
+        let durationMs = min(maximumDurationMs, max(1, requestedDurationMs))
+        let endedAt = Self.date(from: request.captureAnchorUTC)
+            ?? Self.date(from: request.captureWindowEndedAt)
+            ?? Date()
+        let startedAt = Self.date(from: request.captureWindowStartedAt)
+            ?? endedAt.addingTimeInterval(-TimeInterval(durationMs) / 1_000)
+        let frameIntervalMilliseconds = activeSession?.deviceFrameIntervalMilliseconds ?? 1_000
+
+        return RewindCaptureWindow(
+            anchorUTC: ISO8601DateFormatter.rewindProtocol.string(from: endedAt),
+            durationMs: durationMs,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            startedAtUTC: ISO8601DateFormatter.rewindProtocol.string(from: startedAt),
+            endedAtUTC: ISO8601DateFormatter.rewindProtocol.string(from: endedAt),
+            frameInterval: TimeInterval(frameIntervalMilliseconds) / 1_000
+        )
+    }
+
+    private nonisolated static func date(from value: String?) -> Date? {
+        value.flatMap { ISO8601DateFormatter.rewindProtocol.date(from: $0) }
     }
 }
 
@@ -59,6 +218,12 @@ struct CaptureStreamSession: Sendable {
     let streamLongestEdge: Int
     let streamJPEGQuality: Double
     let source: CaptureSource
+    let rewindBufferDurationMilliseconds: Int
+    let rewindBufferMaximumFrames: Int
+    let deviceFrameIntervalMilliseconds: Int
+    let realtimeImageIntervalMilliseconds: Int
+    let audioChunkMilliseconds: Int
+    let audioSampleRate: Int
 }
 
 /// The capture source backing a stream session.
@@ -69,6 +234,7 @@ enum CaptureSource: String, Sendable {
 /// A server-ready video frame produced from the higher-quality capture feed.
 struct CaptureVideoFrame: Sendable {
     let sessionID: UUID
+    let deviceFrameUUID: String
     let sequenceNumber: Int
     let timestamp: Date
     let width: Int
@@ -77,11 +243,13 @@ struct CaptureVideoFrame: Sendable {
     let data: Data
 }
 
-/// An audio sample chunk produced by capture mode.
+/// A PCM audio chunk produced by capture mode.
 struct CaptureAudioChunk: Sendable {
     let sessionID: UUID
     let sequenceNumber: Int
     let timestamp: Date
     let duration: TimeInterval
     let sampleCount: Int
+    let mimeType: String
+    let data: Data
 }

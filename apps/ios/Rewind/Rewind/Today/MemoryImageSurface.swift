@@ -16,28 +16,31 @@ import SwiftUI
 /// can be tuned independently from scrubber interaction state.
 struct MemoryImageSurface: View {
     let imageSource: MemoryImageSource
+    let saveWaveID: UUID?
 
-    init(imageSource: MemoryImageSource) {
+    init(imageSource: MemoryImageSource, saveWaveID: UUID? = nil) {
         self.imageSource = imageSource
+        self.saveWaveID = saveWaveID
     }
 
-    init(imageName: String) {
+    init(imageName: String, saveWaveID: UUID? = nil) {
         self.imageSource = .asset(name: imageName)
+        self.saveWaveID = saveWaveID
     }
 
     var body: some View {
         GeometryReader { proxy in
             MemoryImage(source: imageSource)
                 .frame(width: proxy.size.width, height: proxy.size.height)
-                .memoryWindowEffect(
-                    edgeFraction: 0.13
-                )
+                .memoryWindowEffect(edgeFraction: 0.13, saveWaveID: saveWaveID)
         }
     }
 }
 
-private struct MemoryWindowEffect: ViewModifier {
+struct MemoryWindowEffect: ViewModifier {
     let edgeFraction: CGFloat
+    let saveWaveID: UUID?
+    @State private var saveWaveProgress = 0.62
 
     func body(content: Content) -> some View {
         GeometryReader { proxy in
@@ -48,22 +51,34 @@ private struct MemoryWindowEffect: ViewModifier {
             }
             .compositingGroup()
             .memoryTransitionShader(
-                progress: 0.62,
+                progress: saveWaveProgress,
                 direction: 1,
                 cornerRadius: fallbackRadius,
                 edgeWidth: min(proxy.size.width, proxy.size.height) * 0.30
             )
             .clipShape(RoundedRectangle(cornerRadius: fallbackRadius, style: .continuous))
+            .onChange(of: saveWaveID) { _, _ in
+                saveWaveProgress = 0
+                withAnimation(.smooth(duration: 1.15)) {
+                    saveWaveProgress = 1
+                } completion: {
+                    withAnimation(.smooth(duration: 0.5)) {
+                        saveWaveProgress = 0.62
+                    }
+                }
+            }
         }
     }
 }
 
-private extension View {
+extension View {
     func memoryWindowEffect(
-        edgeFraction: CGFloat
+        edgeFraction: CGFloat,
+        saveWaveID: UUID? = nil
     ) -> some View {
         modifier(MemoryWindowEffect(
-            edgeFraction: edgeFraction
+            edgeFraction: edgeFraction,
+            saveWaveID: saveWaveID
         ))
     }
 

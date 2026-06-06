@@ -116,6 +116,19 @@ BACKEND_URL=http://localhost:8787
 WEB_FRAME_STORE_PATH=.data/device-frames
 ```
 
+The native iOS app defaults to the same backend URL for Simulator builds. For a
+physical iPhone, point `REWIND_BACKEND_URL` at the Mac running the backend, for
+example with an Xcode launch argument:
+
+```txt
+-REWIND_BACKEND_URL http://<mac-lan-ip>:8787
+```
+
+The iOS app also reads `REWIND_DEV_USER_ID`, `REWIND_DEV_DEVICE_ID`, and
+`REWIND_DEVICE_LABEL` from launch arguments, environment, or generated Info.plist
+keys. The backend must be reachable on the local network, typically with
+`HOST=0.0.0.0` as shown in `.env.backend.example`.
+
 The standalone phone simulator writes captured JPEG frames to `WEB_FRAME_STORE_PATH` on the machine running `npm run web`. This imitates the iOS-side frame cache: the backend stores and returns `device_frame_uuid` references, and the simulator renders `/device/frames/:uuid/image` locally when `rewind.search_results` includes frame refs. The folder is append-only for now and grows until you delete it by hand:
 
 ```bash

@@ -12,22 +12,32 @@ import SwiftUI
 struct SearchBar: View {
     @Binding private var searchText: String
     private let isFocused: FocusState<Bool>.Binding
+    private let isBusy: Bool
+    private let onSubmit: () -> Void
 
     init(
         searchText: Binding<String>,
-        isFocused: FocusState<Bool>.Binding
+        isFocused: FocusState<Bool>.Binding,
+        isBusy: Bool = false,
+        onSubmit: @escaping () -> Void = {}
     ) {
         self._searchText = searchText
         self.isFocused = isFocused
+        self.isBusy = isBusy
+        self.onSubmit = onSubmit
     }
 
     var body: some View {
         VStack {
             HStack {
-                Image(systemName: "magnifyingglass")
+                Image(systemName: isBusy ? "waveform" : "magnifyingglass")
+                    .contentTransition(.symbolEffect(.replace))
 
                 TextField("Search", text: $searchText)
                     .focused(isFocused)
+                    .submitLabel(.search)
+                    .disabled(isBusy)
+                    .onSubmit(onSubmit)
             }
             .padding()
             .fontWeight(.semibold)

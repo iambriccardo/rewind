@@ -52,6 +52,7 @@ actor CaptureFrameCache {
             try frame.data.write(to: fileURL, options: .atomic)
 
             let indexFrame = CachedCaptureFrame.IndexFrame(
+                deviceFrameUUID: frame.deviceFrameUUID,
                 sessionID: frame.sessionID,
                 sequenceNumber: frame.sequenceNumber,
                 timestamp: frame.timestamp,
@@ -93,6 +94,86 @@ actor CaptureFrameCache {
         }
     }
 
+    /// Finds the cached phone frame closest to a timestamp.
+    ///
+    /// Backend search results can reference server-side frame rows that are not
+    /// the same images persisted in the phone cache. Timestamp proximity is the
+    /// stable join point for selecting the local image to display.
+    func nearestFrame(near date: Date, maximumDistance: TimeInterval) async -> CachedCaptureFrame? {
+        let match = await nearestFrameMatch(near: date)
+
+        guard match.distance <= maximumDistance else {
+            return nil
+        }
+
+        return match.frame
+    }
+
+    /// Returns the local frame window around the cached frame nearest to a timestamp.
+    ///
+    /// Search result thumbnails use this instead of a single nearest image because
+    /// one frame may not represent the memory well. The returned frames are sorted
+    /// chronologically and include up to `frameCount` frames on each side.
+    func frameWindow(
+        near date: Date,
+        frameCountBeforeAndAfter: Int,
+        maximumDistance: TimeInterval
+    ) async -> [CachedCaptureFrame] {
+        let frames = await framesSurrounding(date)
+        guard !frames.isEmpty else {
+            return []
+        }
+
+        var nearestFrameIndex = 0
+        var nearestDistance = abs(frames[0].timestamp.timeIntervalSince(date))
+
+        for frameIndex in frames.indices.dropFirst() {
+            let distance = abs(frames[frameIndex].timestamp.timeIntervalSince(date))
+            if distance < nearestDistance {
+                nearestDistance = distance
+                nearestFrameIndex = frameIndex
+            }
+        }
+
+        guard nearestDistance <= maximumDistance else {
+            return []
+        }
+
+        let lowerBound = max(frames.startIndex, nearestFrameIndex - frameCountBeforeAndAfter)
+        let upperBound = min(frames.index(before: frames.endIndex), nearestFrameIndex + frameCountBeforeAndAfter)
+        return Array(frames[lowerBound...upperBound])
+    }
+
+    private func nearestFrameMatch(near date: Date) async -> (frame: CachedCaptureFrame?, distance: TimeInterval) {
+        var bestMatch: CachedCaptureFrame?
+        var bestDistance = TimeInterval.greatestFiniteMagnitude
+
+        for frame in await framesSurrounding(date) {
+            let distance = abs(frame.timestamp.timeIntervalSince(date))
+            if distance < bestDistance {
+                bestDistance = distance
+                bestMatch = frame
+            }
+        }
+
+        return (bestMatch, bestDistance)
+    }
+
+    private func framesSurrounding(_ date: Date) async -> [CachedCaptureFrame] {
+        let daysToSearch = [
+            date.addingTimeInterval(-24 * 60 * 60),
+            date,
+            date.addingTimeInterval(24 * 60 * 60)
+        ]
+
+        var surroundingFrames: [CachedCaptureFrame] = []
+        for day in daysToSearch {
+            surroundingFrames.append(contentsOf: await frames(forDayContaining: day))
+        }
+
+        return surroundingFrames.sorted { $0.timestamp < $1.timestamp }
+    }
+
     private func loadIndex(from url: URL) throws -> CaptureFrameIndex {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return CaptureFrameIndex(frames: [])
@@ -125,6 +206,7 @@ actor CaptureFrameCache {
 
 /// A 720p HEIC frame ready for on-device persistence.
 nonisolated struct DeviceCaptureFrame: Sendable {
+    let deviceFrameUUID: String
     let sessionID: UUID
     let sequenceNumber: Int
     let timestamp: Date
@@ -135,6 +217,7 @@ nonisolated struct DeviceCaptureFrame: Sendable {
 
 /// A cached frame available to the timeline UI.
 nonisolated struct CachedCaptureFrame: Identifiable, Hashable, Sendable {
+    let deviceFrameUUID: String?
     let sessionID: UUID
     let sequenceNumber: Int
     let timestamp: Date
@@ -145,7 +228,7 @@ nonisolated struct CachedCaptureFrame: Identifiable, Hashable, Sendable {
     let fileURL: URL
 
     var id: String {
-        "\(captureSecond)-\(sequenceNumber)"
+        deviceFrameUUID ?? "\(captureSecond)-\(sequenceNumber)"
     }
 }
 
@@ -155,6 +238,7 @@ private nonisolated struct CaptureFrameIndex: Codable {
 
 private extension CachedCaptureFrame {
     nonisolated struct IndexFrame: Codable {
+        let deviceFrameUUID: String?
         let sessionID: UUID
         let sequenceNumber: Int
         let timestamp: Date
@@ -166,6 +250,7 @@ private extension CachedCaptureFrame {
     }
 
     nonisolated init(indexFrame: IndexFrame, dayDirectory: URL) {
+        self.deviceFrameUUID = indexFrame.deviceFrameUUID
         self.sessionID = indexFrame.sessionID
         self.sequenceNumber = indexFrame.sequenceNumber
         self.timestamp = indexFrame.timestamp
