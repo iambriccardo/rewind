@@ -16,6 +16,19 @@ Local MVP for a real-time rewind memory agent. The backend accepts a live device
 - Optional frame embedding mode that embeds selected frame images with `gemini-embedding-2` and stores frame vectors for pgvector search
 - Client implementer reference for HTTP endpoints and the live WebSocket state machine in [docs/client-protocol.md](docs/client-protocol.md)
 
+## Repository Layout
+
+```txt
+apps/backend/   Fastify API, Gemini Live agent loop, Supabase repository, Dockerfile
+apps/web/       Browser phone simulator and local ephemeral device-frame store UI
+apps/ios/       Empty placeholder for the native iOS app
+docs/           Client protocol and implementer documentation
+scripts/        Root-level local, Docker, and web runner scripts
+supabase/       Supabase CLI config, migration, and seed files
+```
+
+Keep running commands from the repo root. The root `package.json` is the orchestration surface for the monorepo.
+
 ## Quick Start
 
 Docker is the primary way to run the backend locally. The phone web app runs separately so the backend container does not host browser assets.
@@ -48,7 +61,7 @@ Common Docker commands:
 npm run docker:backend        # local Supabase Docker stack + backend
 npm run docker:local          # local Supabase Docker stack + backend
 npm run docker:remote         # hosted Supabase from .env.backend + backend
-npm run web                   # phone web app from public/
+npm run web                   # phone web app from apps/web/public/
 npm run docker:logs           # follow app container logs
 npm run docker:down           # stop/remove the app container
 ```
@@ -71,7 +84,7 @@ After backend code changes, rerun the same Docker command, for example:
 npm run docker:backend
 ```
 
-The Docker image copies only `src/` at build time. It does not copy or serve `public/`. For phone UI changes, restart `npm run web` or reload the browser. For hot reload while editing backend code, use the non-Docker commands under "Non-Docker Development".
+The Docker image copies only `apps/backend/` at build time. It does not copy or serve `apps/web/`. For phone UI changes, restart `npm run web` or reload the browser. For hot reload while editing backend code, use the non-Docker commands under "Non-Docker Development".
 
 For remote Supabase backend runs, set these in `.env.backend` only when you explicitly want to use the hosted database:
 
@@ -307,11 +320,7 @@ npm run web
 
 ## Supabase
 
-The CLI may be linked to the hosted Supabase project, but do not push, migrate, or query remote Supabase unless explicitly requested.
-
-```txt
-rewind / eoczmtezhqteujpwgbwz
-```
+The CLI may be linked to a hosted Supabase project, but do not push, migrate, or query remote Supabase unless explicitly requested.
 
 Local Supabase:
 

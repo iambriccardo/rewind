@@ -4,6 +4,7 @@ services:
   rewind:
     build:
       context: .
+      dockerfile: apps/backend/Dockerfile
     image: rewind-app:local
     container_name: rewind-app
     restart: unless-stopped

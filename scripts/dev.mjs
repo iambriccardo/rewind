@@ -79,7 +79,7 @@ if (backendAlreadyRunning) {
   process.exit(0);
 }
 
-const server = spawn('npx', ['tsx', 'watch', 'src/server.ts'], {
+const server = spawn('npx', ['tsx', 'watch', 'apps/backend/src/server.ts'], {
   cwd: root,
   env,
   stdio: 'inherit'

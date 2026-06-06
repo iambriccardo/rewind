@@ -6,7 +6,7 @@ import { extname, join, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 
 const root = resolve(new URL('.', import.meta.url).pathname, '..');
-const publicDir = resolve(root, 'public');
+const publicDir = resolve(root, 'apps/web/public');
 const env = readDotenv(resolve(root, '.env.web'));
 const host = env.WEB_HOST || process.env.WEB_HOST || '127.0.0.1';
 const port = Number(env.WEB_PORT || process.env.WEB_PORT || 8788);

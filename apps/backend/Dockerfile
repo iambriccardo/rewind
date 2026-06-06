@@ -9,9 +9,9 @@ ENV PORT=8787
 COPY package*.json ./
 RUN npm ci
 
-COPY tsconfig.json ./
-COPY src ./src
+COPY apps/backend/tsconfig.json ./apps/backend/tsconfig.json
+COPY apps/backend/src ./apps/backend/src
 
 EXPOSE 8787
 
-CMD ["npm", "start"]
+CMD ["npm", "run", "start:backend"]
