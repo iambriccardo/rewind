@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.backend
+.env.web
+.env.local
+.data/
+.docker/
+certs/
+.idea/
+*.log
+.DS_Store

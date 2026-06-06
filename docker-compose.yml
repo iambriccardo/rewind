@@ -1,0 +1,29 @@
+services:
+  rewind:
+    build:
+      context: .
+    image: rewind-app:local
+    container_name: rewind-app
+    restart: unless-stopped
+    ports:
+      - "${REWIND_PORT:-8787}:8787"
+    env_file:
+      - .docker/rewind.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      LOCAL_DATA_PATH: /app/.data/rewind.json
+    volumes:
+      - rewind-data:/app/.data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "wget -qO- http://127.0.0.1:8787/health >/dev/null"
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  rewind-data:

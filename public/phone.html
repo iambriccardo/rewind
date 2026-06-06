@@ -1,0 +1,855 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rewind Phone Simulator</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #101413;
+        color: #eef3ef;
+      }
+      body {
+        margin: 0;
+      }
+      main {
+        display: grid;
+        grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+        gap: 18px;
+        padding: 18px;
+        min-height: calc(100vh - 36px);
+      }
+      section,
+      aside {
+        min-width: 0;
+      }
+      .camera {
+        position: relative;
+        overflow: hidden;
+        border: 1px solid #2b3733;
+        background: #050706;
+        aspect-ratio: 4 / 3;
+      }
+      video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+        transform: scaleX(-1);
+      }
+      .placeholder {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        color: #8fa098;
+        text-align: center;
+        padding: 24px;
+      }
+      .toolbar,
+      .composer {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .toolbar {
+        flex-wrap: wrap;
+      }
+      .toolbar[hidden] {
+        display: none;
+      }
+      input,
+      button {
+        border: 1px solid #34433e;
+        background: #18201d;
+        color: #eef3ef;
+        min-height: 40px;
+        border-radius: 6px;
+        font: inherit;
+      }
+      input {
+        flex: 1;
+        padding: 0 12px;
+      }
+      input[type="number"] {
+        flex: 0 0 auto;
+        width: 68px;
+      }
+      button {
+        padding: 0 12px;
+        cursor: pointer;
+      }
+      .setting {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 40px;
+        color: #c8d7d0;
+        font-size: 13px;
+        white-space: nowrap;
+      }
+      button.primary {
+        background: #2f7d5a;
+        border-color: #3d9e72;
+      }
+      button.active {
+        background: #26342f;
+        border-color: #6e8a7d;
+      }
+      .status {
+        margin-top: 12px;
+        border: 1px solid #34433e;
+        background: #121916;
+        color: #c8d7d0;
+        padding: 10px 12px;
+        border-radius: 6px;
+        font-size: 13px;
+      }
+      .log,
+      .tools,
+      .timeline {
+        border: 1px solid #2b3733;
+        background: #121916;
+        padding: 10px;
+        overflow: auto;
+      }
+      .log,
+      .tools {
+        height: 38vh;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+      }
+      .tools {
+        height: 26vh;
+        margin-bottom: 12px;
+      }
+      .timeline {
+        margin-top: 12px;
+        min-height: 180px;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+        gap: 8px;
+      }
+      .thumb {
+        border: 1px solid #2b3733;
+        background: #0a0d0c;
+        min-height: 72px;
+      }
+      .thumb img {
+        width: 100%;
+        aspect-ratio: 4 / 3;
+        object-fit: cover;
+        display: block;
+      }
+      .thumb small {
+        display: block;
+        padding: 4px;
+        color: #a9bbb2;
+        overflow-wrap: anywhere;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 12px;
+        font-weight: 650;
+      }
+      @media (max-width: 820px) {
+        main {
+          grid-template-columns: 1fr;
+          padding: 12px;
+          min-height: calc(100vh - 24px);
+        }
+        .log {
+          height: 28vh;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section>
+        <h1>Rewind Phone Simulator</h1>
+        <div class="camera">
+          <video id="video" autoplay playsinline muted></video>
+        <div id="placeholder" class="placeholder">Start streaming to share camera and microphone.</div>
+        </div>
+        <div id="status" class="status">Disconnected</div>
+        <div class="toolbar">
+          <button id="stream" class="primary">Start Streaming</button>
+        </div>
+        <div id="streamControls" class="toolbar" hidden>
+          <button id="hideVideo">Hide Camera</button>
+          <button id="muteAudio">Mute Mic</button>
+          <label class="setting">
+            Frame every
+            <input id="frameInterval" type="number" min="1" max="60" step="1" />
+            s
+          </label>
+        </div>
+        <div class="composer">
+          <input id="utterance" value="remember where I left this pen" />
+          <button id="send">Send</button>
+        </div>
+        <div class="composer">
+          <input id="search" value="where is my pen?" />
+          <button id="ask">Ask</button>
+        </div>
+      </section>
+      <aside>
+        <h1>Tool JSON</h1>
+        <div id="tools" class="tools"></div>
+        <h1>Events</h1>
+        <div id="log" class="log"></div>
+        <div id="timeline" class="timeline"></div>
+      </aside>
+    </main>
+    <canvas id="canvas" width="640" height="480" hidden></canvas>
+    <script src="/env.js"></script>
+    <script>
+      const DEFAULT_REALTIME_IMAGE_INTERVAL_SECONDS = 1;
+      const MIN_REALTIME_IMAGE_INTERVAL_SECONDS = 1;
+      const MAX_REALTIME_IMAGE_INTERVAL_SECONDS = 60;
+      const LOCAL_FRAME_CAPTURE_INTERVAL_MS = 1000;
+      const FRAME_BUFFER_SECONDS = 30;
+      const MAX_FRAME_EDGE_PX = 384;
+      const FRAME_JPEG_QUALITY = 0.62;
+      const AUDIO_SAMPLE_RATE = 16000;
+      const AUDIO_CHUNK_MS = 250;
+      const AUDIO_CHUNK_SAMPLE_COUNT = Math.round((AUDIO_SAMPLE_RATE * AUDIO_CHUNK_MS) / 1000);
+      const DEFAULT_BACKEND_URL = 'http://localhost:8787';
+      const webConfig = window.REWIND_WEB_CONFIG || {};
+
+      const state = {
+        ws: null,
+        sessionId: null,
+        buffer: [],
+        assets: new Map(),
+        streaming: false,
+        mediaStream: null,
+        frameStreamTimer: null,
+        localCaptureTimer: null,
+        mediaSeq: 0,
+        audioStreamer: null,
+        persistedFrames: new Set(),
+        framePersistPromises: new Map(),
+        frameStoreErrorLogged: false,
+        videoHidden: false,
+        audioMuted: false,
+        frameIntervalSeconds: readFrameIntervalSeconds()
+      };
+
+      const els = {
+        video: document.getElementById('video'),
+        placeholder: document.getElementById('placeholder'),
+        canvas: document.getElementById('canvas'),
+        stream: document.getElementById('stream'),
+        streamControls: document.getElementById('streamControls'),
+        hideVideo: document.getElementById('hideVideo'),
+        muteAudio: document.getElementById('muteAudio'),
+        frameInterval: document.getElementById('frameInterval'),
+        utterance: document.getElementById('utterance'),
+        search: document.getElementById('search'),
+        send: document.getElementById('send'),
+        ask: document.getElementById('ask'),
+        status: document.getElementById('status'),
+        log: document.getElementById('log'),
+        tools: document.getElementById('tools'),
+        timeline: document.getElementById('timeline')
+      };
+
+      els.frameInterval.value = String(state.frameIntervalSeconds);
+
+      function log(message, payload) {
+        const line = `[${new Date().toLocaleTimeString()}] ${message}${payload ? `\n${JSON.stringify(payload, null, 2)}` : ''}\n`;
+        els.log.textContent = line + els.log.textContent;
+      }
+
+      function toolLog(kind, payload) {
+        const line = `[${new Date().toLocaleTimeString()}] ${kind}\n${JSON.stringify(payload, null, 2)}\n\n`;
+        els.tools.textContent = line + els.tools.textContent;
+      }
+
+      function setStatus(message) {
+        els.status.textContent = message;
+      }
+
+      function clampFrameIntervalSeconds(value) {
+        const seconds = Number.parseInt(value, 10);
+        if (!Number.isFinite(seconds)) return DEFAULT_REALTIME_IMAGE_INTERVAL_SECONDS;
+        return Math.min(MAX_REALTIME_IMAGE_INTERVAL_SECONDS, Math.max(MIN_REALTIME_IMAGE_INTERVAL_SECONDS, seconds));
+      }
+
+      function readFrameIntervalSeconds() {
+        return clampFrameIntervalSeconds(localStorage.getItem('rewind_frame_interval_seconds'));
+      }
+
+      function currentFrameIntervalMs() {
+        return state.frameIntervalSeconds * 1000;
+      }
+
+      function updateFrameInterval() {
+        state.frameIntervalSeconds = clampFrameIntervalSeconds(els.frameInterval.value);
+        els.frameInterval.value = String(state.frameIntervalSeconds);
+        localStorage.setItem('rewind_frame_interval_seconds', String(state.frameIntervalSeconds));
+        if (state.streaming && !state.videoHidden) {
+          scheduleFrameStreaming();
+          log('Realtime frame interval updated', { seconds: state.frameIntervalSeconds });
+        }
+      }
+
+      function describeMediaError(error) {
+        if (error?.message === 'permission-timeout') {
+          return 'The browser did not answer the permission request. Check for a camera/mic prompt in the browser chrome, or open the phone app from npm run web at http://localhost:8788/phone.html.';
+        }
+        if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+          return 'Camera/mic requires localhost or HTTPS. Use npm run web locally, or use HTTPS for a phone/LAN URL.';
+        }
+        if (error?.name === 'NotAllowedError') {
+          return 'Permission was denied or blocked. Check browser site settings for camera/microphone access.';
+        }
+        if (error?.name === 'NotFoundError') {
+          return 'No matching camera/microphone device was found.';
+        }
+        if (error?.name === 'NotReadableError') {
+          return 'The device is already in use by another app or browser tab.';
+        }
+        return error?.message || String(error);
+      }
+
+      async function reportMediaReadiness() {
+        const details = {
+          url: location.href,
+          secure_context: window.isSecureContext,
+          media_devices_api: Boolean(navigator.mediaDevices?.getUserMedia),
+          audio_context_api: Boolean(window.AudioContext || window.webkitAudioContext)
+        };
+        try {
+          if (navigator.permissions?.query) {
+            const camera = await navigator.permissions.query({ name: 'camera' });
+            const microphone = await navigator.permissions.query({ name: 'microphone' });
+            details.camera_permission = camera.state;
+            details.microphone_permission = microphone.state;
+          }
+        } catch {
+          details.permission_query = 'unavailable';
+        }
+        log('Media readiness', details);
+      }
+
+      function wsUrl() {
+        const backendUrl = new URL(webConfig.BACKEND_URL || DEFAULT_BACKEND_URL);
+        const proto = backendUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+        const params = new URLSearchParams({
+          user_id: webConfig.DEV_USER_ID || '00000000-0000-4000-8000-000000000001',
+          device_id: webConfig.DEV_DEVICE_ID || 'dev-phone'
+        });
+        return `${proto}//${backendUrl.host}/v1/live?${params}`;
+      }
+
+      function connect() {
+        if (state.ws?.readyState === WebSocket.OPEN) return Promise.resolve();
+        if (state.ws?.readyState === WebSocket.CONNECTING) {
+          return new Promise((resolve, reject) => {
+            state.ws.addEventListener('open', resolve, { once: true });
+            state.ws.addEventListener('error', reject, { once: true });
+          });
+        }
+        state.ws = new WebSocket(wsUrl());
+        const ready = new Promise((resolve, reject) => {
+          state.ws.addEventListener('open', resolve, { once: true });
+          state.ws.addEventListener('error', reject, { once: true });
+        });
+        state.ws.onopen = () => {
+          setStatus('Connected');
+          log('WebSocket connected');
+        };
+        state.ws.onclose = () => {
+          setStatus('Disconnected');
+          log('WebSocket disconnected');
+        };
+        state.ws.onerror = () => log('WebSocket error');
+        state.ws.onmessage = (event) => handleServerMessage(JSON.parse(event.data));
+        return ready;
+      }
+
+      async function startStreaming() {
+        if (state.streaming) {
+          stopStreaming();
+          return;
+        }
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error('Camera/microphone API unavailable in this browser context.');
+        }
+        if (!window.AudioContext && !window.webkitAudioContext) {
+          throw new Error('Web Audio API unavailable in this browser context.');
+        }
+        await connect();
+        setStatus('Requesting camera and microphone permission...');
+        els.stream.disabled = true;
+        const stream = await withTimeout(
+          navigator.mediaDevices.getUserMedia({
+            video: {
+              width: { ideal: MAX_FRAME_EDGE_PX },
+              height: { ideal: Math.round((MAX_FRAME_EDGE_PX * 3) / 4) },
+              frameRate: { ideal: 10, max: 15 },
+              facingMode: 'environment'
+            },
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true
+            }
+          }),
+          10000
+        );
+        reportMediaReadiness();
+        state.mediaStream = stream;
+        els.video.srcObject = stream;
+        await els.video.play();
+        state.streaming = true;
+        state.videoHidden = false;
+        state.audioMuted = false;
+        els.placeholder.style.display = 'none';
+        els.stream.textContent = 'Stop Streaming';
+        els.stream.disabled = false;
+        els.streamControls.hidden = false;
+        updateStreamControls();
+        setStatus('Streaming camera and microphone');
+        captureFrame('local buffer');
+        send({ type: 'user.turn', state: 'start' });
+        scheduleLocalCapture();
+        sendFrameToAgent();
+        scheduleFrameStreaming();
+        await startAudioStreaming(stream);
+      }
+
+      function stopStreaming() {
+        if (state.frameStreamTimer || state.localCaptureTimer) {
+          clearFrameTimers();
+          send({ type: 'user.media_end', modality: 'image' });
+        }
+        if (stopAudioStreaming()) {
+          send({ type: 'user.media_end', modality: 'audio' });
+        }
+        send({ type: 'user.turn', state: 'end' });
+        state.mediaStream?.getTracks().forEach((track) => track.stop());
+        state.mediaStream = null;
+        state.streaming = false;
+        state.videoHidden = false;
+        state.audioMuted = false;
+        els.video.srcObject = null;
+        els.video.style.visibility = 'visible';
+        els.placeholder.style.display = 'grid';
+        els.stream.textContent = 'Start Streaming';
+        els.stream.disabled = false;
+        els.streamControls.hidden = true;
+        setStatus('Streaming stopped');
+      }
+
+      function clearFrameTimers() {
+        if (state.frameStreamTimer) {
+          clearInterval(state.frameStreamTimer);
+          state.frameStreamTimer = null;
+        }
+        if (state.localCaptureTimer) {
+          clearInterval(state.localCaptureTimer);
+          state.localCaptureTimer = null;
+        }
+      }
+
+      function scheduleLocalCapture() {
+        if (state.localCaptureTimer) clearInterval(state.localCaptureTimer);
+        state.localCaptureTimer = setInterval(() => {
+          if (state.streaming && !state.videoHidden) captureFrame('local buffer');
+        }, LOCAL_FRAME_CAPTURE_INTERVAL_MS);
+      }
+
+      function scheduleFrameStreaming() {
+        if (state.frameStreamTimer) clearInterval(state.frameStreamTimer);
+        state.frameStreamTimer = setInterval(sendFrameToAgent, currentFrameIntervalMs());
+      }
+
+      function captureFrame(caption = '') {
+        const ctx = els.canvas.getContext('2d');
+        if (state.streaming && !state.videoHidden && els.video.videoWidth) {
+          const scale = Math.min(1, MAX_FRAME_EDGE_PX / Math.max(els.video.videoWidth, els.video.videoHeight));
+          els.canvas.width = Math.max(1, Math.round(els.video.videoWidth * scale));
+          els.canvas.height = Math.max(1, Math.round(els.video.videoHeight * scale));
+          ctx.drawImage(els.video, 0, 0, els.canvas.width, els.canvas.height);
+        } else {
+          ctx.fillStyle = `hsl(${Math.floor(Math.random() * 360)} 34% 25%)`;
+          ctx.fillRect(0, 0, els.canvas.width, els.canvas.height);
+          ctx.fillStyle = '#eef3ef';
+          ctx.font = '28px system-ui';
+          ctx.fillText(new Date().toLocaleTimeString(), 24, 54);
+          ctx.font = '18px system-ui';
+          ctx.fillText(caption || 'local fallback frame', 24, 92);
+        }
+        const frame = {
+          uuid: crypto.randomUUID(),
+          capturedAt: new Date().toISOString(),
+          dataUrl: els.canvas.toDataURL('image/jpeg', FRAME_JPEG_QUALITY),
+          caption
+        };
+        state.buffer.push(frame);
+        state.assets.set(frame.uuid, frame);
+        state.buffer = state.buffer.slice(-FRAME_BUFFER_SECONDS);
+        void persistFrame(frame);
+        return frame;
+      }
+
+      function persistFrame(frame) {
+        if (state.persistedFrames.has(frame.uuid)) return Promise.resolve();
+        const existing = state.framePersistPromises.get(frame.uuid);
+        if (existing) return existing;
+
+        const pending = fetch('/device/frames', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            device_frame_uuid: frame.uuid,
+            captured_at: frame.capturedAt,
+            caption: frame.caption,
+            mime_type: 'image/jpeg',
+            data_url: frame.dataUrl
+          })
+        })
+          .then((response) => {
+            if (!response.ok) throw new Error(`Frame store returned ${response.status}`);
+            state.persistedFrames.add(frame.uuid);
+          })
+          .catch((error) => {
+            if (!state.frameStoreErrorLogged) {
+              state.frameStoreErrorLogged = true;
+              log('Device frame store failed', { error: error.message || String(error) });
+            }
+          })
+          .finally(() => {
+            state.framePersistPromises.delete(frame.uuid);
+          });
+
+        state.framePersistPromises.set(frame.uuid, pending);
+        return pending;
+      }
+
+      async function persistFrames(frames) {
+        await Promise.allSettled(frames.map((frame) => persistFrame(frame)));
+      }
+
+      function sendFrameToAgent() {
+        if (!state.streaming || state.videoHidden) return;
+        const frame = state.buffer.at(-1) || captureFrame('realtime observation');
+        const base64 = frame.dataUrl.split(',')[1];
+        send({
+          type: 'user.media',
+          modality: 'image',
+          mime_type: 'image/jpeg',
+          data: base64,
+          seq: ++state.mediaSeq,
+          timestamp: frame.capturedAt
+        });
+      }
+
+      async function startAudioStreaming(stream) {
+        const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+        const audioContext = new AudioContextCtor();
+        await audioContext.resume();
+        const audioStream = new MediaStream(stream.getAudioTracks());
+        const source = audioContext.createMediaStreamSource(audioStream);
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+        const mutedOutput = audioContext.createGain();
+        mutedOutput.gain.value = 0;
+        let pendingSamples = new Int16Array(0);
+
+        processor.onaudioprocess = (event) => {
+          event.outputBuffer.getChannelData(0).fill(0);
+          if (!state.streaming || state.audioMuted) return;
+          const input = event.inputBuffer.getChannelData(0);
+          const pcm = downsampleToPcm16(input, audioContext.sampleRate, AUDIO_SAMPLE_RATE);
+          pendingSamples = concatInt16(pendingSamples, pcm);
+          while (pendingSamples.length >= AUDIO_CHUNK_SAMPLE_COUNT) {
+            const chunk = pendingSamples.slice(0, AUDIO_CHUNK_SAMPLE_COUNT);
+            pendingSamples = pendingSamples.slice(AUDIO_CHUNK_SAMPLE_COUNT);
+            sendAudioPcmChunk(chunk);
+          }
+        };
+
+        source.connect(processor);
+        processor.connect(mutedOutput);
+        mutedOutput.connect(audioContext.destination);
+        state.audioStreamer = { audioContext, source, processor, mutedOutput };
+      }
+
+      function stopAudioStreaming() {
+        const streamer = state.audioStreamer;
+        if (!streamer) return false;
+        streamer.processor.disconnect();
+        streamer.source.disconnect();
+        streamer.mutedOutput.disconnect();
+        streamer.audioContext.close().catch(() => {});
+        state.audioStreamer = null;
+        return true;
+      }
+
+      function sendAudioPcmChunk(samples) {
+        if (!samples.length) return;
+        send({
+          type: 'user.media',
+          modality: 'audio',
+          mime_type: `audio/pcm;rate=${AUDIO_SAMPLE_RATE}`,
+          data: int16ToBase64(samples),
+          seq: ++state.mediaSeq,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      function downsampleToPcm16(input, inputRate, outputRate) {
+        const ratio = inputRate / outputRate;
+        const outputLength = Math.max(1, Math.floor(input.length / ratio));
+        const output = new Int16Array(outputLength);
+        for (let i = 0; i < outputLength; i += 1) {
+          const start = Math.floor(i * ratio);
+          const end = Math.min(input.length, Math.floor((i + 1) * ratio));
+          let sum = 0;
+          for (let j = start; j < end; j += 1) sum += input[j];
+          const sample = Math.max(-1, Math.min(1, sum / Math.max(1, end - start)));
+          output[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+        }
+        return output;
+      }
+
+      function concatInt16(a, b) {
+        const output = new Int16Array(a.length + b.length);
+        output.set(a, 0);
+        output.set(b, a.length);
+        return output;
+      }
+
+      function int16ToBase64(samples) {
+        const bytes = new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        }
+        return btoa(binary);
+      }
+
+      function toggleVideoHidden() {
+        state.videoHidden = !state.videoHidden;
+        for (const track of state.mediaStream?.getVideoTracks() ?? []) {
+          track.enabled = !state.videoHidden;
+        }
+        els.video.style.visibility = state.videoHidden ? 'hidden' : 'visible';
+        els.placeholder.style.display = state.videoHidden ? 'grid' : 'none';
+        els.placeholder.textContent = state.videoHidden ? 'Camera hidden' : 'Start streaming to share camera and microphone.';
+        if (state.videoHidden) {
+          if (state.frameStreamTimer) {
+            clearInterval(state.frameStreamTimer);
+            state.frameStreamTimer = null;
+          }
+          send({ type: 'user.media_end', modality: 'image' });
+        } else {
+          captureFrame('local buffer');
+          sendFrameToAgent();
+          scheduleFrameStreaming();
+        }
+        updateStreamControls();
+      }
+
+      function toggleAudioMuted() {
+        state.audioMuted = !state.audioMuted;
+        for (const track of state.mediaStream?.getAudioTracks() ?? []) {
+          track.enabled = !state.audioMuted;
+        }
+        if (state.audioMuted) send({ type: 'user.media_end', modality: 'audio' });
+        updateStreamControls();
+      }
+
+      function updateStreamControls() {
+        els.hideVideo.textContent = state.videoHidden ? 'Show Camera' : 'Hide Camera';
+        els.muteAudio.textContent = state.audioMuted ? 'Unmute Mic' : 'Mute Mic';
+        els.hideVideo.classList.toggle('active', state.videoHidden);
+        els.muteAudio.classList.toggle('active', state.audioMuted);
+      }
+
+      function withTimeout(promise, timeoutMs) {
+        return Promise.race([
+          promise,
+          new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('permission-timeout')), timeoutMs);
+          })
+        ]);
+      }
+
+      async function handleServerMessage(message) {
+        if (message.type === 'session.ready') {
+          state.sessionId = message.session_id;
+          log('Session ready', message);
+          return;
+        }
+        if (message.type === 'device.command') {
+          log(`Command: ${message.command.command_type}`, message.command.payload);
+          await handleDeviceCommand(message.command);
+          return;
+        }
+        if (message.type === 'agent.tool_call') {
+          toolLog('tool_call', message.tool_call);
+          return;
+        }
+        if (message.type === 'agent.tool_result') {
+          toolLog('tool_result', message);
+          return;
+        }
+        if (message.type === 'agent.media') {
+          log('Agent media', {
+            modality: message.modality,
+            mime_type: message.mime_type,
+            text: message.text,
+            data_bytes_base64: message.data?.length
+          });
+          return;
+        }
+        if (message.type === 'search.results') {
+          log('Search results', message.results);
+          return;
+        }
+        if (message.type === 'rewind.committed') {
+          log('Rewind committed', { event: message.event, frames: message.frames.length });
+          return;
+        }
+        log(message.type, message);
+      }
+
+      async function handleDeviceCommand(command) {
+        if (command.command_type === 'device.capture_rewind') {
+          if (!state.buffer.length) {
+            captureFrame('captured on demand');
+          }
+          const durationSeconds = Number(command.payload.rewind_duration_seconds || 6);
+          const frames = state.buffer.slice(-Math.max(1, Math.min(FRAME_BUFFER_SECONDS, durationSeconds)));
+          await persistFrames(frames);
+          send({
+            type: 'device.command_ack',
+            command_id: command.id,
+            status: 'ok',
+            payload: { frame_count: frames.length, rewind_duration_seconds: durationSeconds }
+          });
+          send({
+            type: 'rewind.commit',
+            event_id: command.payload.event_id,
+            local_asset_id: `local-${command.payload.event_id}`,
+            thumbnail_frame_uuid: frames.at(-1)?.uuid,
+            started_at: frames[0]?.capturedAt,
+            ended_at: frames.at(-1)?.capturedAt,
+            frames: frames.map((frame, index) => {
+              const payload = {
+                device_frame_uuid: frame.uuid,
+                local_asset_id: `local-${command.payload.event_id}`,
+                captured_at: frame.capturedAt,
+                offset_ms: index * 1000,
+                caption: frame.caption || command.payload.title
+              };
+              if (command.payload.include_frame_images) {
+                payload.image_base64 = frame.dataUrl.split(',')[1];
+                payload.mime_type = 'image/jpeg';
+              }
+              return payload;
+            }),
+            metadata: {
+              simulator: true,
+              rewind_duration_seconds: durationSeconds,
+              frame_embedding_mode: command.payload.frame_embedding_mode || 'text_only'
+            }
+          });
+          return;
+        }
+
+        if (command.command_type === 'device.show_rewind') {
+          renderTimeline(command.payload.frame_refs || []);
+          send({
+            type: 'device.command_ack',
+            command_id: command.id,
+            status: 'ok',
+            payload: { displayed: true }
+          });
+          return;
+        }
+
+        send({
+          type: 'device.command_ack',
+          command_id: command.id,
+          status: 'error',
+          error: `Unknown command ${command.command_type}`
+        });
+      }
+
+      function renderTimeline(frameRefs) {
+        els.timeline.innerHTML = '';
+        const orderedRefs = [...frameRefs].sort((a, b) => {
+          const aTime = Date.parse(a.captured_at || '') || Number(a.offset_ms ?? 0);
+          const bTime = Date.parse(b.captured_at || '') || Number(b.offset_ms ?? 0);
+          return aTime - bTime;
+        });
+        for (const ref of orderedRefs) {
+          const frame = state.assets.get(ref.device_frame_uuid);
+          const item = document.createElement('div');
+          item.className = 'thumb';
+          const img = document.createElement('img');
+          if (frame) {
+            img.src = frame.dataUrl;
+          } else {
+            img.src = deviceFrameImageUrl(ref.device_frame_uuid);
+            img.onerror = () => {
+              img.remove();
+              item.classList.add('missing');
+            };
+          }
+          item.appendChild(img);
+          const label = document.createElement('small');
+          label.textContent = ref.caption || ref.device_frame_uuid;
+          item.appendChild(label);
+          els.timeline.appendChild(item);
+        }
+      }
+
+      function deviceFrameImageUrl(deviceFrameUuid) {
+        return `/device/frames/${encodeURIComponent(deviceFrameUuid)}/image`;
+      }
+
+      function send(message) {
+        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+          log('Cannot send; WebSocket is not connected');
+          return;
+        }
+        state.ws.send(JSON.stringify(message));
+      }
+
+      async function sendUserText(text) {
+        await connect();
+        send({ type: 'user.text', text });
+      }
+
+      els.stream.onclick = () =>
+        startStreaming().catch((error) => {
+          const message = describeMediaError(error);
+          els.stream.disabled = false;
+          setStatus(`Streaming failed: ${message}`);
+          log('Streaming failed', { name: error.name, error: message });
+        });
+      els.hideVideo.onclick = toggleVideoHidden;
+      els.muteAudio.onclick = toggleAudioMuted;
+      els.frameInterval.onchange = updateFrameInterval;
+      els.frameInterval.oninput = updateFrameInterval;
+      els.send.onclick = () => sendUserText(els.utterance.value);
+      els.ask.onclick = () => sendUserText(els.search.value);
+      els.utterance.onkeydown = (event) => {
+        if (event.key === 'Enter') els.send.click();
+      };
+      els.search.onkeydown = (event) => {
+        if (event.key === 'Enter') els.ask.click();
+      };
+    </script>
+  </body>
+</html>

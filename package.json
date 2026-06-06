@@ -1,0 +1,43 @@
+{
+  "name": "rewind",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "docker:run": "node scripts/docker-run.mjs",
+    "docker:backend": "node scripts/docker-run.mjs --data remote --target backend",
+    "docker:local": "node scripts/docker-run.mjs --data local --target backend",
+    "docker:local:backend": "node scripts/docker-run.mjs --data local --target backend",
+    "docker:json": "node scripts/docker-run.mjs --data json --target backend",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f rewind",
+    "dev:all": "node scripts/dev.mjs",
+    "dev:json": "node scripts/dev.mjs --data json --open backend",
+    "dev:local": "node scripts/dev.mjs --data local --open backend",
+    "dev:remote": "node scripts/dev.mjs --data remote --open backend",
+    "dev": "tsx watch src/server.ts",
+    "web": "node scripts/web-run.mjs",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "supabase:start": "supabase start",
+    "supabase:stop": "supabase stop",
+    "supabase:reset": "supabase db reset",
+    "supabase:push": "supabase db push"
+  },
+  "dependencies": {
+    "@fastify/static": "^8.2.0",
+    "@fastify/websocket": "^11.2.0",
+    "@google/genai": "^1.30.0",
+    "@supabase/supabase-js": "^2.86.0",
+    "dotenv": "^17.2.3",
+    "fastify": "^5.6.2",
+    "ws": "^8.18.3",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

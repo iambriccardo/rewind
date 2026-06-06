@@ -1,0 +1,11 @@
+node_modules
+npm-debug.log
+.git
+.data
+.docker
+.env
+.env.backend
+.env.web
+.DS_Store
+supabase/.branches
+supabase/.temp

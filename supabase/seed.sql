@@ -1,0 +1,1 @@
+-- Intentionally empty for the MVP. Use this for local sample data later.
