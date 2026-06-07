@@ -57,28 +57,35 @@ export class GeminiLiveAgent {
           type: 'object',
           additionalProperties: false,
           properties: {
-            title: { type: 'string' },
+            title: {
+              type: 'string',
+              description:
+                'Short content-specific title naming the saved object, person, place, or activity. Do not use protocol or duration titles like "Last 30 seconds", "Remember this", or "Saved moment" unless the user-provided label is the actual memory content.'
+            },
             description: {
               type: 'string',
               description:
-                'A compact memory summary inferred from the user request plus recent audio/video context. Resolve vague references like this, that, here, or where I put this by using visible objects, actions, and spatial context.'
+                'A compact memory summary inferred from the user request plus recent audio/video context. Resolve vague references like this, that, here, or where I put this by using visible objects, actions, and spatial context. If the user gives an explicit duration, use it for rewind_duration_seconds but still summarize the actual saved content.'
             },
             entities: {
               type: 'array',
+              minItems: 1,
+              maxItems: 16,
               items: { type: 'string' },
               description:
-                'Lowercase plain searchable labels inferred from the utterance and recent camera/audio context: objects, people, places, visible labels/text, surfaces, containers, and actions. Use short noun phrases without quotes, JSON, punctuation wrappers, or generic labels. Include the likely referent even when the user only says this or that.'
+                'Lowercase plain searchable labels inferred from the utterance and recent camera/audio context: objects, people, places, visible labels/text, surfaces, containers, and actions. Use short noun phrases without quotes, JSON, punctuation wrappers, or generic labels. Include the likely referent even when the user only says this or that. Prefer distinctive labels with attributes, colors, brands, text, spatial relations, or roles; avoid standalone generic labels such as man, person, people, activity, thing, pointing, talking, or outdoors unless paired with a specific descriptor.'
             },
             location_hint: {
               type: 'string',
-              description: 'Short physical/spatial hint inferred from the scene, such as desk, kitchen counter, backpack, shelf, table, or room.'
+              description:
+                'Short physical/spatial hint inferred from the scene, such as office desk, kitchen counter, sofa, backpack, shelf, patio, parking lot, table, or room. Include it when a reliable place, surface, container, or area is visible or mentioned.'
             },
             rewind_duration_seconds: {
               type: 'integer',
               minimum: 1,
               maximum: this.clientSession.maxRewindDurationSeconds,
               description:
-                'How many seconds of the phone rolling buffer should be preserved, ending at the backend save-request anchor. If the user says a duration like last 20 seconds or last minute, use that duration clamped to the client buffer. Otherwise infer the smallest useful current-moment window.'
+                'How many seconds of the phone rolling buffer should be preserved, ending at the backend save-request anchor. If the user says a duration like last 20 seconds or last minute, use that duration clamped to the client buffer. Otherwise infer a dynamic window that covers the coherent current activity or object/location moment without exceeding the available buffer.'
             }
           },
           required: ['title', 'description', 'entities', 'rewind_duration_seconds']
@@ -111,6 +118,7 @@ export class GeminiLiveAgent {
             },
             entities: {
               type: 'array',
+              maxItems: 16,
               items: { type: 'string' },
               description:
                 'Lowercase plain entities from the search request and likely synonyms. Use short strings only, and include these only when they narrow the database search.'
@@ -311,7 +319,6 @@ export class GeminiLiveAgent {
   private getLiveConfig(): LiveConnectConfig {
     const liveConfig: LiveConnectConfig = {
       responseModalities: usesNativeAudioModel(config.LIVE_MODEL_NAME) ? [Modality.AUDIO] : [Modality.TEXT],
-      temperature: 0.2,
       maxOutputTokens: 256,
       mediaResolution: MediaResolution.MEDIA_RESOLUTION_LOW,
       systemInstruction: systemInstruction(this.clientSession),
@@ -324,6 +331,10 @@ export class GeminiLiveAgent {
         }
       }
     };
+
+    if (!usesGemini3Model(config.LIVE_MODEL_NAME)) {
+      liveConfig.temperature = 0.2;
+    }
 
     if (usesNativeAudioModel(config.LIVE_MODEL_NAME)) {
       liveConfig.inputAudioTranscription = {};
@@ -358,9 +369,15 @@ function usesNativeAudioModel(model: string): boolean {
   return model.includes('native-audio');
 }
 
+function usesGemini3Model(model: string): boolean {
+  return /^gemini-3(?:[.-]|$)/.test(model);
+}
+
 function systemInstruction(clientSession: NormalizedClientSession): string {
   const maxSeconds = clientSession.maxRewindDurationSeconds;
   const bufferMs = clientSession.bufferDurationMs;
+  const frameIntervalMs = clientSession.hello.buffers.rewind.frame_interval_ms;
+  const maxFrames = clientSession.hello.buffers.rewind.max_frames;
   const clientContext = clientSession.hello.context;
   const currentTime = clientContext?.current_time ?? new Date().toISOString();
   const timeZone = clientContext?.time_zone ?? 'unknown';
@@ -373,6 +390,7 @@ function systemInstruction(clientSession: NormalizedClientSession): string {
     '# Client Context',
     `- Current client time: ${currentTime}.`,
     `- Client timezone: ${timeZone}${utcOffset === undefined ? '' : `, UTC offset minutes: ${utcOffset}`}.`,
+    `- Rolling rewind buffer: ${bufferMs} ms, maximum requested duration: ${maxSeconds} seconds${frameIntervalMs === undefined ? '' : `, device frame interval: ${frameIntervalMs} ms`}${maxFrames === undefined ? '' : `, max stored frame refs: ${maxFrames}`}.`,
     '- Interpret relative date phrases using the client time and timezone, not server time. After resolving the user-local period, emit all datetimes as UTC ISO strings ending in Z.',
     '',
     '# Default Behavior',
@@ -388,17 +406,28 @@ function systemInstruction(clientSession: NormalizedClientSession): string {
     '- English save-intent examples: "remember this", "remember that", "save this", "save this moment", "capture this", "record this for later", "bookmark this", "log this", "note this", "keep this", "remember where I put this", "remember where I left X", "remember that I did X", "remind me about this", "remind me where this is", "don\'t let me forget this", "I want to remember this later", "store this memory", "mark this spot", "save where this is".',
     '- Generalize save intent across languages without relying on exact keywords, but only when the utterance is clearly a direct request to preserve/store/remember the current context.',
     '- Do NOT call create_rewind for weak or non-imperative phrases like "this is interesting", "look at this", "wow", "that was cool", "I might need this", "maybe remember", ordinary narration, or a search question. If intent is ambiguous, stay passive or give a brief clarification instead of saving.',
-    `- The trusted phone reports a rolling rewind buffer of ${bufferMs} ms, so rewind_duration_seconds MUST be between 1 and ${maxSeconds}. Never request more than the available buffer.`,
-    '- ALWAYS include rewind_duration_seconds. Priority order: first honor an explicit user duration such as "last 20 seconds", "the last minute", "the past 30 seconds", or "the whole last 45 seconds"; otherwise infer the smallest useful replay window, not a generic long clip.',
+    `- The trusted phone reports a rolling rewind buffer of ${bufferMs} ms, so rewind_duration_seconds MUST be between 1 and ${maxSeconds}. Never request more than the available buffer; if the coherent activity appears longer, use ${maxSeconds}.`,
+    '- ALWAYS include rewind_duration_seconds. Priority order: first honor an explicit user duration such as "last 20 seconds", "the last minute", "the past 30 seconds", or "the whole last 45 seconds"; otherwise infer a dynamic replay window from the observed activity duration and context.',
     '- Convert user durations to seconds. Use 20 for "last 20 seconds"; use 60 for "last minute"; clamp anything longer than the reported buffer down to the maximum available buffer. If the user says "last few seconds", choose about 5 seconds.',
-    '- Duration inference guidance when no explicit duration is given: a quick object/location memory usually needs 4-8 seconds; an object shown briefly for about 2 seconds should use about 3-5 seconds; a short action should use 6-12 seconds; use a longer duration only when the user explicitly asks for more context or the relevant action visibly spans longer.',
-    '- If uncertain, prefer a shorter window that still contains the object/action and immediate context. Do not request 20 seconds for a simple static object memory.',
+    '- Duration inference guidance when no explicit duration is given: first identify the coherent thing the user is asking to preserve, then choose a window that covers that whole span including immediate setup and context. After that span is covered, avoid extra unrelated buffer. A quick static object/location memory usually needs 4-8 seconds; an object shown briefly for about 2 seconds should use about 3-5 seconds; a short discrete action should use 6-12 seconds.',
+    '- For ongoing multi-step physical activities such as cooking, preparing food, building, sorting, packing, cleaning, repairing, arranging objects, or playing with/manipulating several items, use a longer window that covers the visible/audible activity leading up to the save request. If the activity has clearly been unfolding for 20-45 seconds, request about that much. If it has been ongoing for roughly a minute or longer, request the maximum available buffer.',
+    '- Do not default to 8-12 seconds for an ongoing activity just because the user says "save this". The words "this" or "that" should refer to the current activity span when recent context shows a continuing action, not only to the final frame.',
+    '- If uncertain, prefer a window that preserves the full object/action and immediate context while staying under the buffer max. Do not request 20+ seconds for a simple static object memory unless longer context is visibly or audibly relevant.',
+    '',
+    '# Duration Examples',
+    `- User says "remember where I put this" while holding keys over a desk; title "Keys on desk", rewind_duration_seconds around 5, entities like ["keys", "desk"].`,
+    `- User says "save this" after briefly showing a product label or receipt; title the visible item/text, use rewind_duration_seconds around 4-6, and include the visible text/brand in entities.`,
+    `- User says "save this" after a short pour, handoff, placement, or button press that just happened; title the action/content and use rewind_duration_seconds around 8-12.`,
+    `- User says "save this" while actively cooking, preparing food, assembling, sorting, packing, cleaning, repairing, or manipulating several items for many seconds; title the activity/content and use rewind_duration_seconds around 30-45 when that covers the visible activity.`,
+    `- User says "save this" while that same coherent activity has been going on for about a minute or longer; title the activity/content and set rewind_duration_seconds to ${maxSeconds}.`,
+    `- User says "save the last 90 seconds"; set rewind_duration_seconds to ${maxSeconds}, because the client buffer maximum is ${maxSeconds}, but still title the actual content, not "Last 90 seconds".`,
     '- Infer the memory from ALL RECENT CONTEXT: the user words, audio history, visible camera frames, visible text, object positions, places, surfaces, and actions.',
     '- If the user says "this", "that", "it", "here", or "where I put this", resolve the referent from the camera/video context.',
-    '- entities is REQUIRED. It must be a simple array of lowercase strings. Include concrete searchable labels: objects, people, places, surfaces, containers, visible text/brands, and actions. Use short noun phrases. Do not include quotes inside the strings, JSON-like structures, bullets, full sentences, or generic words like thing, stuff, object, moment, memory.',
-    '- description must be a compact retrieval summary: what happened, what object/action matters, where it is, and the spatial relationship that would help future search.',
-    '- title should be short and human-readable.',
-    '- location_hint is optional but should be included for useful physical hints such as desk, table, shelf, drawer, kitchen counter, backpack, room, or visible area.',
+    '- entities is REQUIRED. It must be a simple array of lowercase strings. Include concrete searchable labels: objects, people, places, surfaces, containers, visible text/brands, colors, identifiers, spatial relationships, and actions. Use short noun phrases. Do not include quotes inside the strings, JSON-like structures, bullets, full sentences, or generic words like thing, stuff, object, moment, memory.',
+    '- Avoid weak standalone entities such as man, person, people, activity, discussion, talking, pointing, outdoors, office, or room when a more specific label is available. Prefer distinctive phrases such as "man in white cap", "beige pen", "green wristband", "orange deck chair", "license plate w 31944 d", "office desk", or "phone on white sofa".',
+    '- description must be a compact retrieval summary: what happened, what object/action matters, where it is, and the spatial relationship that would help future search. If the user gave an explicit duration, do not let the duration replace the actual memory content.',
+    '- title should be short, human-readable, and content-specific. Do not title memories as "Last N seconds", "Last N seconds memory", "Last N seconds activity", "Remember this", or "Remind me about this" when the visible/audible content can be named.',
+    '- location_hint should be included whenever a reliable place, surface, container, or area is visible or mentioned. Use concise hints such as office desk, white sofa, outdoor patio, parking lot, wall, kitchen counter, shelf, drawer, backpack, or table. Omit it only when no reliable physical hint is available.',
     '- Keep create_rewind arguments compact. Do not include raw transcripts, protocol details, base64, frame IDs, timestamps, dates, or unnecessary metadata.',
     '',
     '# Search Rewinds',

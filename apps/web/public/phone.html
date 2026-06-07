@@ -417,7 +417,6 @@
     </main>
     <canvas id="canvas" width="640" height="480" hidden></canvas>
     <script src="/env.js"></script>
-    <script src="/rewind-frame-cache.js"></script>
     <script>
       const DEFAULT_REALTIME_IMAGE_INTERVAL_SECONDS = 1;
       const MIN_REALTIME_IMAGE_INTERVAL_SECONDS = 1;
@@ -435,6 +434,7 @@
       const PLAYBACK_INTERVAL_MS = 450;
       const DEFAULT_BACKEND_URL = 'http://localhost:8787';
       const webConfig = window.REWIND_WEB_CONFIG || {};
+      window.RewindFrameCache ||= createRewindFrameCache();
 
       const state = {
         ws: null,
@@ -462,6 +462,67 @@
         playbackIndex: 0,
         playbackTimer: null
       };
+
+      function createRewindFrameCache() {
+        function deviceFrameImageUrl(deviceFrameUuid) {
+          return `/device/frames/${encodeURIComponent(String(deviceFrameUuid))}/image`;
+        }
+
+        function normalizeFrameRef(ref, options = {}) {
+          if (!ref || typeof ref !== 'object') return null;
+
+          const frameUuid =
+            ref.device_frame_uuid ||
+            ref.deviceFrameUuid ||
+            ref.frame_uuid ||
+            ref.frameUuid ||
+            ref.uuid ||
+            ref.id;
+          if (!frameUuid) return null;
+
+          const asset = options.assetResolver?.(frameUuid);
+          return {
+            ...ref,
+            frame_id: ref.frame_id || ref.frameId,
+            device_frame_uuid: frameUuid,
+            captured_at: ref.captured_at || ref.capturedAt || asset?.capturedAt || null,
+            offset_ms: ref.offset_ms ?? ref.offsetMs ?? null,
+            src: ref.src || ref.image_url || ref.imageUrl || asset?.dataUrl || deviceFrameImageUrl(frameUuid)
+          };
+        }
+
+        function compileFrameRefs(frameRefs, options = {}) {
+          if (!Array.isArray(frameRefs)) return [];
+
+          return frameRefs
+            .map((ref) => normalizeFrameRef(ref, options))
+            .filter(Boolean)
+            .sort(compareFrameRefs);
+        }
+
+        async function compileResultFrames(result, options = {}) {
+          return compileFrameRefs(result?.frame_refs || result?.frames || [], options);
+        }
+
+        function compareFrameRefs(a, b) {
+          const capturedA = Date.parse(a.captured_at || '');
+          const capturedB = Date.parse(b.captured_at || '');
+          if (Number.isFinite(capturedA) && Number.isFinite(capturedB) && capturedA !== capturedB) return capturedA - capturedB;
+
+          const offsetA = Number(a.offset_ms);
+          const offsetB = Number(b.offset_ms);
+          if (Number.isFinite(offsetA) && Number.isFinite(offsetB) && offsetA !== offsetB) return offsetA - offsetB;
+
+          return String(a.device_frame_uuid).localeCompare(String(b.device_frame_uuid));
+        }
+
+        return {
+          compileFrameRefs,
+          compileResultFrames,
+          deviceFrameImageUrl,
+          normalizeFrameRef
+        };
+      }
 
       const els = {
         video: document.getElementById('video'),
@@ -1339,7 +1400,17 @@
           });
           setSummary('Rewind saved', `${request.title} · ${result.frames?.length ?? frames.length} frames uploaded.`, 'ok');
           renderSavedMemory(request, result.frames?.length ?? frames.length, 'saved');
-          renderTimeline(result.frames || upload.frames);
+          try {
+            renderTimeline(result.frames || upload.frames);
+          } catch (timelineError) {
+            const message = timelineError.message || String(timelineError);
+            log('Timeline render failed', { event_id: result.event?.id || request.event_id, error: message });
+            protocolLog('rewind.timeline_failed', {
+              event_id: result.event?.id || request.event_id,
+              error: message
+            });
+            setSummary('Rewind saved', `${request.title} · ${result.frames?.length ?? frames.length} frames uploaded. Playback unavailable: ${message}`, 'ok');
+          }
           log('Rewind uploaded', { event_id: result.event?.id || request.event_id, frames: result.frames?.length ?? frames.length });
         } catch (error) {
           setSummary('Rewind upload failed', error.message || String(error), 'error');
@@ -1452,12 +1523,6 @@
         restartPlayback();
       }
 
-      function normalizeFrameRef(ref) {
-        return window.RewindFrameCache.normalizeFrameRef(ref, {
-          assetResolver: (frameUuid) => state.assets.get(frameUuid)
-        });
-      }
-
       function showPlaybackFrame(index, immediate) {
         if (!state.playbackFrames.length) return;
         state.playbackIndex = ((index % state.playbackFrames.length) + state.playbackFrames.length) % state.playbackFrames.length;
@@ -1503,10 +1568,6 @@
         }
         if (ref.offset_ms != null) return `+${Math.round(Number(ref.offset_ms) / 1000)}s`;
         return `Frame ${index + 1}`;
-      }
-
-      function deviceFrameImageUrl(deviceFrameUuid) {
-        return window.RewindFrameCache.deviceFrameImageUrl(deviceFrameUuid);
       }
 
       async function runManualSearch(event) {
