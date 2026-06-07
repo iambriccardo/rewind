@@ -28,6 +28,14 @@ struct MemoryImage: View {
         self.source = .asset(name: imageName)
     }
 
+    /// Clears decoded file-backed images after the on-device frame cache is deleted.
+    @MainActor
+    static func clearFileCache() {
+#if canImport(UIKit)
+        MemoryImageFileCache.removeAll()
+#endif
+    }
+
     var body: some View {
         GeometryReader { proxy in
             ZStack {
@@ -131,6 +139,10 @@ private enum MemoryImageFileCache {
 
         cache.setObject(image, forKey: key)
         return image
+    }
+
+    static func removeAll() {
+        cache.removeAllObjects()
     }
 }
 #endif

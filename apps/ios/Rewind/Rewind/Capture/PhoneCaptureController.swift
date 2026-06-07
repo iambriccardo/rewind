@@ -15,6 +15,11 @@ import Observation
 import OSLog
 import UniformTypeIdentifiers
 
+enum PhoneCaptureBufferPolicy {
+    static let duration: TimeInterval = 20
+    static let maximumFrames = 140
+}
+
 /// Coordinates phone camera and microphone capture for the temporary capture mode.
 ///
 /// This controller deliberately mirrors the later glasses ingestion boundary: one session, a
@@ -23,16 +28,17 @@ import UniformTypeIdentifiers
 @Observable
 final class PhoneCaptureController: NSObject {
     let cachedFrames: AsyncStream<CachedCaptureFrame>
+    let audioChunks: AsyncStream<CaptureAudioChunk>
 
     static let captureFrameRate = 7
     static let streamFrameRate = 1
     static let streamLongestEdge = 384
     static let streamJPEGQuality: CGFloat = 0.62
-    static let deviceCacheFrameRate = 1
+    static let deviceCacheFrameRate = 7
     static let deviceCacheLongestEdge = 1_280
     static let deviceCacheHEICQuality: CGFloat = 0.52
-    static let rewindBufferDurationMilliseconds = 60_000
-    static let rewindBufferMaximumFrames = 60
+    static let rewindBufferDurationMilliseconds = Int(PhoneCaptureBufferPolicy.duration * 1_000)
+    static let rewindBufferMaximumFrames = PhoneCaptureBufferPolicy.maximumFrames
     static let audioSampleRate = 16_000
     static let audioChunkMilliseconds = 250
 
@@ -66,6 +72,7 @@ final class PhoneCaptureController: NSObject {
     @ObservationIgnored private let frameCache: CaptureFrameCache
     @ObservationIgnored private let sampleProcessor: CaptureSampleProcessor
     @ObservationIgnored private let cachedFrameContinuation: AsyncStream<CachedCaptureFrame>.Continuation
+    @ObservationIgnored private let audioChunkContinuation: AsyncStream<CaptureAudioChunk>.Continuation
     @ObservationIgnored private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "app.vogelhaus.Rewind",
         category: "PhoneCapture"
@@ -92,10 +99,16 @@ final class PhoneCaptureController: NSObject {
             cachedFrameContinuation = continuation
         }
         self.cachedFrameContinuation = cachedFrameContinuation
+        var audioChunkContinuation: AsyncStream<CaptureAudioChunk>.Continuation!
+        self.audioChunks = AsyncStream(bufferingPolicy: .bufferingNewest(12)) { continuation in
+            audioChunkContinuation = continuation
+        }
+        self.audioChunkContinuation = audioChunkContinuation
         self.sampleProcessor = CaptureSampleProcessor(
             endpoint: endpoint,
             frameCache: frameCache,
-            cachedFrameContinuation: cachedFrameContinuation
+            cachedFrameContinuation: cachedFrameContinuation,
+            audioChunkContinuation: audioChunkContinuation
         )
         super.init()
         startMetricsListener()
@@ -106,7 +119,7 @@ final class PhoneCaptureController: NSObject {
     }
 
     func start() async {
-        guard !isRunning else {
+        guard state == .idle else {
             return
         }
 
@@ -114,7 +127,7 @@ final class PhoneCaptureController: NSObject {
 
         guard await requestAccess(for: .video), await requestAccess(for: .audio) else {
             state = .failed("Camera and microphone access are required.")
-            logger.error("Capture mode permission request failed")
+            logger.error("Phone capture permission request failed")
             return
         }
         guard state == .requestingAccess else {
@@ -186,11 +199,15 @@ final class PhoneCaptureController: NSObject {
         }
         state = .running
         logger.info(
-            "Phone capture started at \(Self.captureFrameRate, privacy: .public) FPS with \(Self.streamFrameRate, privacy: .public) FPS server stream and \(Self.deviceCacheFrameRate, privacy: .public) FPS device cache"
+            "Phone capture started at \(Self.captureFrameRate, privacy: .public) FPS with \(Self.streamFrameRate, privacy: .public) FPS server stream and saved-memory buffer plus \(Self.deviceCacheFrameRate, privacy: .public) FPS device cache"
         )
     }
 
     func stop() async {
+        guard state != .idle, state != .stopping else {
+            return
+        }
+
         guard currentSession != nil else {
             state = .idle
             return
@@ -241,11 +258,14 @@ final class PhoneCaptureController: NSObject {
             captureSession.commitConfiguration()
         }
 
-        guard captureSession.canSetSessionPreset(.hd1280x720) else {
+        if captureSession.canSetSessionPreset(.hd1280x720) {
+            captureSession.sessionPreset = .hd1280x720
+        } else if captureSession.canSetSessionPreset(.high) {
+            captureSession.sessionPreset = .high
+            logger.error("Falling back to high camera preset because 720p is unavailable")
+        } else {
             throw PhoneCaptureError.hdCaptureUnavailable
         }
-
-        captureSession.sessionPreset = .hd1280x720
 
         guard
             let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
@@ -255,7 +275,11 @@ final class PhoneCaptureController: NSObject {
             throw PhoneCaptureError.videoInputUnavailable
         }
 
-        try configureFrameRate(on: videoDevice)
+        do {
+            try configureFrameRate(on: videoDevice)
+        } catch {
+            logger.error("Falling back to default camera frame rate: \(error.localizedDescription, privacy: .public)")
+        }
         captureSession.addInput(videoInput)
 
         guard
@@ -418,6 +442,7 @@ private final class CaptureSampleProcessor {
     private let endpoint: CaptureStreamEndpoint
     private let frameCache: CaptureFrameCache
     private let cachedFrameContinuation: AsyncStream<CachedCaptureFrame>.Continuation
+    private let audioChunkContinuation: AsyncStream<CaptureAudioChunk>.Continuation
     private let metricsContinuation: AsyncStream<CaptureMetricsUpdate>.Continuation
     private let audioEncoder = CaptureAudioPCMEncoder(
         outputSampleRate: PhoneCaptureController.audioSampleRate,
@@ -441,11 +466,13 @@ private final class CaptureSampleProcessor {
     init(
         endpoint: CaptureStreamEndpoint,
         frameCache: CaptureFrameCache,
-        cachedFrameContinuation: AsyncStream<CachedCaptureFrame>.Continuation
+        cachedFrameContinuation: AsyncStream<CachedCaptureFrame>.Continuation,
+        audioChunkContinuation: AsyncStream<CaptureAudioChunk>.Continuation
     ) {
         self.endpoint = endpoint
         self.frameCache = frameCache
         self.cachedFrameContinuation = cachedFrameContinuation
+        self.audioChunkContinuation = audioChunkContinuation
         var metricsContinuation: AsyncStream<CaptureMetricsUpdate>.Continuation!
         self.metrics = AsyncStream { continuation in
             metricsContinuation = continuation
@@ -501,12 +528,14 @@ private final class CaptureSampleProcessor {
 
                 let frame = DeviceCaptureFrame(
                     deviceFrameUUID: deviceFrameUUID,
+                    memoryEventID: nil,
                     sessionID: streamSession.id,
                     sequenceNumber: cachedVideoFrameCount,
                     timestamp: capturedAt,
                     width: cachedImage.width,
                     height: cachedImage.height,
-                    data: cachedImage.data
+                    data: cachedImage.data,
+                    fileExtension: "heic"
                 )
 
                 Task {
@@ -567,6 +596,11 @@ private final class CaptureSampleProcessor {
                 mimeType: "audio/pcm;rate=\(PhoneCaptureController.audioSampleRate)",
                 data: chunkData
             )
+
+            // This local copy lets wearable-mode speech intent detection observe
+            // the same captured audio without adding a second microphone session
+            // or changing the backend stream lifecycle.
+            audioChunkContinuation.yield(chunk)
 
             Task {
                 await endpoint.receiveAudioChunk(chunk)

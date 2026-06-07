@@ -131,7 +131,7 @@ nonisolated struct RewindConfiguration: Sendable {
 
     private nonisolated static var defaultBackendURLString: String {
 #if os(iOS) && !targetEnvironment(simulator)
-        "http://10.10.43.5:8787"
+        "http://172.20.10.2:8787"
 #else
         "http://localhost:8787"
 #endif

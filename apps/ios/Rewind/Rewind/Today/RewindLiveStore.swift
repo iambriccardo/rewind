@@ -20,18 +20,12 @@ final class RewindLiveStore {
 
     private(set) var status: LiveStatus = .starting
     private(set) var sessionID: String?
-    private(set) var latestAgentText: String?
     private(set) var currentSaveRequest: RewindSaveRequest?
     private(set) var lastCommittedFrameCount: Int?
     private(set) var searchResults: [RewindSearchResultCard] = []
     private(set) var searchQuery: String?
     private(set) var searchError: String?
     private(set) var isSearchBusy = false
-    /// Changes whenever the backend delivers a search result batch.
-    ///
-    /// Voice prompts can ask Rewind to find memories without the text search field
-    /// ever becoming active, so the view observes this token to present results.
-    private(set) var searchResultsPresentationID = UUID()
     private(set) var saveWaveID = UUID()
     private(set) var latestCachedFrame: CachedCaptureFrame?
 
@@ -115,10 +109,12 @@ final class RewindLiveStore {
             return
         }
 
+        startEventListenerIfNeeded()
         isSearchBusy = true
         searchQuery = trimmedQuery
         searchError = nil
         status = .searching(trimmedQuery)
+        logger.info("Submitting Rewind search query")
         await endpoint.search(query: trimmedQuery)
     }
 
@@ -162,6 +158,20 @@ final class RewindLiveStore {
     }
 
     private func handle(_ event: RewindProtocolEvent) async {
+        switch event {
+        case let .searchStarted(search):
+            handleSearchStarted(search)
+            return
+        case let .searchResults(results):
+            await handleSearchResults(results)
+            return
+        case let .failed(message, scope):
+            handleFailure(message, scope: scope)
+            return
+        default:
+            break
+        }
+
         guard wantsCaptureActive else {
             return
         }
@@ -200,40 +210,63 @@ final class RewindLiveStore {
             currentSaveRequest = nil
             lastCommittedFrameCount = frameCount
             status = .saved(request.title, frameCount)
-        case let .searchResults(results):
-            searchResults = await makeResultCards(from: results)
-            searchQuery = results.query
-            searchError = nil
-            isSearchBusy = false
-            searchResultsPresentationID = UUID()
-            status = .searchComplete(results.results.count, results.query)
         case let .agentText(text):
-            latestAgentText = text
+            logger.info("Received agent text response with \(text.count, privacy: .public) characters")
         case let .agentAudio(audio):
 #if os(iOS)
             audioPlayer.play(audio)
 #endif
-        case let .failed(message, scope):
-            let wasSearching = isSearchBusy
-            if scope == .connection {
-                sessionID = nil
-                saveCommitTask?.cancel()
-                saveCommitTask = nil
-#if os(iOS)
-                audioPlayer.stop()
-#endif
-            }
-            isSearchBusy = false
-            if scope == .connection || !wasSearching {
-                saveCommitTask = nil
-                currentSaveRequest = nil
-            }
-            if wasSearching {
-                searchError = message
-            }
-            status = scope == .connection ? .failed(message) : .operationFailed(message)
-            logger.error("Live protocol failed: \(message, privacy: .public)")
+        case .searchStarted, .searchResults, .failed:
+            break
         }
+    }
+
+    private func handleSearchStarted(_ search: RewindSearchStarted) {
+        guard wantsCaptureActive else {
+            return
+        }
+
+        searchQuery = search.query
+        searchResults = []
+        searchError = nil
+        isSearchBusy = true
+        status = .searching(search.query)
+        logger.info("Live Rewind search started")
+    }
+
+    private func handleSearchResults(_ results: RewindSearchResults) async {
+        searchResults = await makeResultCards(from: results)
+        searchQuery = results.query
+        searchError = nil
+        isSearchBusy = false
+        status = .searchComplete(results.results.count, results.query)
+        logger.info("Search completed with \(results.results.count, privacy: .public) results")
+    }
+
+    private func handleFailure(_ message: String, scope: RewindProtocolFailureScope) {
+        let wasSearching = isSearchBusy
+        guard wantsCaptureActive || wasSearching else {
+            return
+        }
+
+        if scope == .connection {
+            sessionID = nil
+            saveCommitTask?.cancel()
+            saveCommitTask = nil
+#if os(iOS)
+            audioPlayer.stop()
+#endif
+        }
+        isSearchBusy = false
+        if scope == .connection || !wasSearching {
+            saveCommitTask = nil
+            currentSaveRequest = nil
+        }
+        if wasSearching {
+            searchError = message
+        }
+        status = scope == .connection ? .failed(message) : .operationFailed(message)
+        logger.error("Live protocol failed: \(message, privacy: .public)")
     }
 
     private func makeResultCards(from results: RewindSearchResults) async -> [RewindSearchResultCard] {
@@ -263,7 +296,7 @@ final class RewindLiveStore {
         }
 
         let maximumDistance = Self.resultImageMatchWindow(for: result)
-        let frames = await frameCache.frameWindow(
+        let frames = await frameCache.localTimelineFrameWindow(
             near: targetDate,
             frameCountBeforeAndAfter: 10,
             maximumDistance: maximumDistance
@@ -271,7 +304,7 @@ final class RewindLiveStore {
 
         guard !frames.isEmpty else {
             logger.info(
-                "No cached phone frame window matched search result \(result.eventID, privacy: .public) within \(maximumDistance, privacy: .public) seconds"
+                "No local timeline frame window matched search result \(result.eventID, privacy: .public) within \(maximumDistance, privacy: .public) seconds"
             )
             return []
         }

@@ -33,6 +33,8 @@ nonisolated enum RewindProtocolDecoder {
             return .agentMedia(try decoder.decode(RewindAgentMedia.self, from: data))
         case "rewind.save_request":
             return .saveRequest(try decoder.decode(RewindSaveRequest.self, from: data))
+        case "rewind.search_started":
+            return .searchStarted(try decoder.decode(RewindSearchStarted.self, from: data))
         case "rewind.search_results":
             return .searchResults(try decoder.decode(RewindSearchResults.self, from: data))
         case "error":

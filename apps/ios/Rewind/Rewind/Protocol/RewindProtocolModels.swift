@@ -98,6 +98,7 @@ nonisolated enum RewindServerMessage: Sendable {
     case agentMessage(String)
     case agentMedia(RewindAgentMedia)
     case saveRequest(RewindSaveRequest)
+    case searchStarted(RewindSearchStarted)
     case searchResults(RewindSearchResults)
     case error(String)
     case unknown(String)
@@ -164,6 +165,31 @@ nonisolated struct RewindSaveRequest: Decodable, Identifiable, Sendable {
         case captureWindowEndedAt = "capture_window_ended_at"
         case includeFrameImages = "include_frame_images"
         case frameEmbeddingMode = "frame_embedding_mode"
+    }
+}
+
+/// Search progress event emitted by the live protocol before hydrated results are available.
+nonisolated struct RewindSearchStarted: Decodable, Sendable {
+    let requestID: String
+    let query: String
+    let text: String
+    let filters: Filters?
+
+    enum CodingKeys: String, CodingKey {
+        case requestID = "request_id"
+        case query
+        case text
+        case filters
+    }
+
+    nonisolated struct Filters: Decodable, Sendable {
+        let entities: [String]?
+        let locationHint: String?
+
+        enum CodingKeys: String, CodingKey {
+            case entities
+            case locationHint = "location_hint"
+        }
     }
 }
 

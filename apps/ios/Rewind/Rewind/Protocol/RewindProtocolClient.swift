@@ -279,6 +279,8 @@ actor RewindProtocolClient {
             }
         case let .saveRequest(request):
             continuation.yield(.saveRequest(request))
+        case let .searchStarted(search):
+            continuation.yield(.searchStarted(search))
         case let .searchResults(results):
             continuation.yield(.searchResults(results))
         case let .error(message):
@@ -320,6 +322,7 @@ enum RewindProtocolEvent: Sendable {
     case sessionReady(RewindSessionReady)
     case saveRequest(RewindSaveRequest)
     case rewindCommitted(RewindSaveRequest, Int)
+    case searchStarted(RewindSearchStarted)
     case searchResults(RewindSearchResults)
     case agentText(String)
     case agentAudio(RewindAgentAudio)

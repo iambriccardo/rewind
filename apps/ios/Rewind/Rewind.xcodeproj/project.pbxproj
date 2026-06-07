@@ -259,8 +259,9 @@
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Rewind connects to the development backend on your local network.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Rewind can attach approximate location when you ask it to save a memory.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Rewind uses the microphone so you can speak to the live memory agent.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Rewind uses local speech recognition in wearable simulation mode to react immediately when you ask it to remember something.";
 				INFOPLIST_KEY_REWIND_BACKEND_URL = "http://localhost:8787";
-				"INFOPLIST_KEY_REWIND_BACKEND_URL[sdk=iphoneos*]" = "http://10.10.43.5:8787";
+				"INFOPLIST_KEY_REWIND_BACKEND_URL[sdk=iphoneos*]" = "http://172.20.10.2:8787";
 				INFOPLIST_KEY_REWIND_DEVICE_LABEL = "Rewind iPhone";
 				INFOPLIST_KEY_REWIND_DEV_DEVICE_ID = "dev-phone";
 				INFOPLIST_KEY_REWIND_DEV_USER_ID = "00000000-0000-4000-8000-000000000001";
@@ -313,8 +314,9 @@
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Rewind connects to the development backend on your local network.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Rewind can attach approximate location when you ask it to save a memory.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Rewind uses the microphone so you can speak to the live memory agent.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Rewind uses local speech recognition in wearable simulation mode to react immediately when you ask it to remember something.";
 				INFOPLIST_KEY_REWIND_BACKEND_URL = "http://localhost:8787";
-				"INFOPLIST_KEY_REWIND_BACKEND_URL[sdk=iphoneos*]" = "http://10.10.43.5:8787";
+				"INFOPLIST_KEY_REWIND_BACKEND_URL[sdk=iphoneos*]" = "http://172.20.10.2:8787";
 				INFOPLIST_KEY_REWIND_DEVICE_LABEL = "Rewind iPhone";
 				INFOPLIST_KEY_REWIND_DEV_DEVICE_ID = "dev-phone";
 				INFOPLIST_KEY_REWIND_DEV_USER_ID = "00000000-0000-4000-8000-000000000001";

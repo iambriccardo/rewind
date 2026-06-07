@@ -9,102 +9,117 @@ import SwiftUI
 
 /// The live Rewind surface.
 ///
-/// This screen intentionally keeps the capture UI simple: the camera and protocol
-/// start automatically, saved memories produce a full-screen ripple, and search
-/// opens a separate mode that stays visible until Back is tapped.
+/// This screen keeps the timeline clean by default. Recording only runs while
+/// the dedicated live mode is open, and search opens from explicit UI input.
 struct Today: View {
-    @Environment(\.scenePhase) private var scenePhase
     @State private var timelineStore = CaptureTimelineStore()
     @State private var liveStore = RewindLiveStore()
     @State private var searchText = ""
     @State private var isSearchPresented = false
+    @State private var isLiveModePresented = false
+    @State private var isSettingsPresented = false
     @State private var shouldFocusSearchOnPresentation = false
+    @State private var selectedTimelineDate: Date
+    @State private var isTimelineScrubbing = false
+    @State private var isTimelineBrowsing = false
+    @State private var granularScrubStartDate: Date?
+    @State private var granularScrubCurrentFrameID: String?
+    @State private var granularScrubFeedbackID = 0
     @State private var latestLocalFrame: CachedCaptureFrame?
-    @FocusState private var isSearchFieldFocused: Bool
+    @Namespace private var presentationNamespace
 
-    init(selectedDate: Date = .now) {}
+    init(selectedDate: Date = .now) {
+        self._selectedTimelineDate = State(initialValue: selectedDate)
+    }
 
     var body: some View {
         ZStack {
+            Color.black
+                .ignoresSafeArea()
+
             LiveMemorySurface(
                 liveStore: liveStore,
                 timelineStore: timelineStore,
-                latestLocalFrame: latestLocalFrame
+                timelineFrame: timelineFrame,
+                latestLocalFrame: latestLocalFrame,
+                prefersCameraPreview: false
             )
+            .contentShape(Rectangle())
+            .gesture(granularScrubGesture)
 
-            if isSearchPresented {
-                SearchExperience(
-                    searchText: $searchText,
-                    isFocused: $isSearchFieldFocused,
-                    isSearching: liveStore.isSearchBusy,
-                    query: liveStore.searchQuery ?? searchText,
-                    errorMessage: liveStore.searchError,
-                    results: liveStore.searchResults,
-                    focusOnAppear: shouldFocusSearchOnPresentation
-                ) {
-                    isSearchPresented = false
-                    isSearchFieldFocused = false
-                    shouldFocusSearchOnPresentation = false
-                } onSubmit: {
-                    Task {
-                        await submitSearch()
-                    }
+            if !isSearchPresented, let visibleRange = timelineStore.visibleRange {
+                HStack {
+                    Spacer()
+
+                    Scrubber(
+                        selection: $selectedTimelineDate,
+                        isScrubbing: $isTimelineScrubbing,
+                        startDate: visibleRange.start,
+                        endDate: visibleRange.end,
+                        availableIntervals: timelineStore.availableIntervals,
+                        protectedVerticalInsets: scrubberProtectedInsets
+                    )
+                    .ignoresSafeArea(edges: .vertical)
                 }
-                .transition(.move(edge: .trailing).combined(with: .opacity))
-                .zIndex(10)
+                .ignoresSafeArea(edges: .vertical)
+                .zIndex(2)
             }
         }
         .safeAreaInset(edge: .bottom) {
-            if !isSearchPresented {
-                SearchBar(
-                    searchText: $searchText,
-                    isFocused: $isSearchFieldFocused,
-                    isBusy: liveStore.isSearchBusy
-                ) {
-                    Task {
-                        await submitSearch()
-                    }
+            RewindControlBar(
+                namespace: presentationNamespace,
+                searchTransitionID: Self.searchTransitionID,
+                settingsTransitionID: Self.settingsTransitionID,
+                captureTransitionID: Self.captureTransitionID
+            ) {
+                presentSearch()
+            } onSettings: {
+                presentSettings()
+            } onCapture: {
+                presentLiveMode()
+            }
+            .padding(.horizontal, 32)
+        }
+        .fullScreenCover(isPresented: $isSearchPresented, onDismiss: dismissSearch) {
+            SearchExperience(
+                searchText: $searchText,
+                isSearching: liveStore.isSearchBusy,
+                errorMessage: liveStore.searchError,
+                results: liveStore.searchResults,
+                focusOnAppear: shouldFocusSearchOnPresentation
+            ) {
+                dismissSearch()
+            } onSubmit: {
+                Task {
+                    await submitSearch()
                 }
-                .padding()
             }
+            .navigationTransition(.zoom(sourceID: Self.searchTransitionID, in: presentationNamespace))
+            .presentationBackground(.black)
         }
-        .onChange(of: isSearchFieldFocused) { _, isFocused in
-            guard isFocused, !isSearchPresented else {
-                return
-            }
-
-            shouldFocusSearchOnPresentation = true
-            withAnimation(.smooth(duration: 0.22)) {
-                isSearchPresented = true
-            }
+        .fullScreenCover(isPresented: $isLiveModePresented) {
+            LiveCapture()
+                .navigationTransition(.zoom(sourceID: Self.captureTransitionID, in: presentationNamespace))
         }
-        .onChange(of: liveStore.searchResultsPresentationID) { _, _ in
-            guard liveStore.searchQuery != nil || !liveStore.searchResults.isEmpty else {
+        .fullScreenCover(isPresented: $isSettingsPresented, onDismiss: {
+            Task {
+                await reloadTimelineAtNow()
+            }
+        }) {
+            RewindSettingsView()
+                .navigationTransition(.zoom(sourceID: Self.settingsTransitionID, in: presentationNamespace))
+        }
+        .onChange(of: isLiveModePresented) { _, isPresented in
+            guard !isPresented else {
                 return
             }
 
-            if let searchQuery = liveStore.searchQuery {
-                searchText = searchQuery
-            }
-
-            guard !isSearchPresented else {
-                return
-            }
-
-            shouldFocusSearchOnPresentation = false
-            isSearchFieldFocused = false
-            withAnimation(.smooth(duration: 0.22)) {
-                isSearchPresented = true
+            Task {
+                await reloadTimelineAtNow()
             }
         }
         .task {
             await loadTimeline()
-            await liveStore.start()
-        }
-        .onChange(of: scenePhase) { _, phase in
-            Task {
-                await handleScenePhase(phase)
-            }
         }
         .onChange(of: liveStore.latestCachedFrame) { _, frame in
             guard let frame else {
@@ -116,6 +131,52 @@ struct Today: View {
                 await loadTimeline(containing: frame.timestamp)
             }
         }
+        .onDisappear {
+            isTimelineScrubbing = false
+            granularScrubStartDate = nil
+            granularScrubCurrentFrameID = nil
+        }
+        .onChange(of: isTimelineScrubbing) { _, isScrubbing in
+            if isScrubbing {
+                isTimelineBrowsing = true
+            }
+        }
+        .onChange(of: selectedTimelineDate) { _, _ in
+            if isSelectedTimelineAtNow {
+                isTimelineBrowsing = false
+                granularScrubStartDate = nil
+                granularScrubCurrentFrameID = nil
+            } else {
+                isTimelineBrowsing = true
+            }
+
+        }
+        .sensoryFeedback(.selection, trigger: granularScrubFeedbackID)
+    }
+
+    private func presentSearch() {
+        shouldFocusSearchOnPresentation = true
+        withAnimation(.smooth(duration: 0.22)) {
+            isSearchPresented = true
+        }
+    }
+
+    private func dismissSearch() {
+        isSearchPresented = false
+        shouldFocusSearchOnPresentation = false
+    }
+
+    private func presentLiveMode() {
+        dismissSearch()
+        isTimelineBrowsing = false
+        granularScrubStartDate = nil
+        selectedTimelineDate = .now
+
+        isLiveModePresented = true
+    }
+
+    private func presentSettings() {
+        isSettingsPresented = true
     }
 
     private func submitSearch() async {
@@ -125,10 +186,7 @@ struct Today: View {
         }
 
         if !isSearchPresented {
-            shouldFocusSearchOnPresentation = true
-            withAnimation(.smooth(duration: 0.22)) {
-                isSearchPresented = true
-            }
+            presentSearch()
         }
 
         await liveStore.submitSearch(query)
@@ -136,18 +194,79 @@ struct Today: View {
 
     private func loadTimeline(containing date: Date = .now) async {
         await timelineStore.loadDay(containing: date)
+        if !isTimelineBrowsing {
+            selectedTimelineDate = Self.isNow(date) ? .now : timelineStore.initialSelection(preferredDate: date)
+        }
         latestLocalFrame = timelineStore.frames.last
     }
 
-    private func handleScenePhase(_ phase: ScenePhase) async {
-        switch phase {
-        case .active:
-            await liveStore.start()
-        case .inactive, .background:
-            await liveStore.stop()
-        @unknown default:
-            break
+    private func reloadTimelineAtNow() async {
+        isTimelineBrowsing = false
+        isTimelineScrubbing = false
+        granularScrubStartDate = nil
+        await loadTimeline(containing: .now)
+        selectedTimelineDate = .now
+    }
+
+    private var timelineFrame: CachedCaptureFrame? {
+        guard isTimelineBrowsing else {
+            return nil
         }
+
+        return timelineStore.timelineFrame(for: selectedTimelineDate)
+    }
+
+    private var isSelectedTimelineAtNow: Bool {
+        Self.isNow(selectedTimelineDate)
+    }
+
+    private var granularScrubGesture: some Gesture {
+        DragGesture(minimumDistance: 6, coordinateSpace: .local)
+            .onChanged { value in
+                guard !isSearchPresented, isTimelineBrowsing else {
+                    return
+                }
+
+                if granularScrubStartDate == nil {
+                    granularScrubStartDate = selectedTimelineDate
+                    granularScrubCurrentFrameID = timelineStore.timelineFrame(for: selectedTimelineDate)?.id
+                }
+
+                let startDate = granularScrubStartDate ?? selectedTimelineDate
+                let horizontalDelta = value.translation.width * Self.granularScrubSecondsPerPoint
+                let verticalDelta = -value.translation.height * Self.granularScrubSecondsPerPoint
+                let proposedDate = startDate.addingTimeInterval(horizontalDelta + verticalDelta)
+                let nextSelectionDate = timelineStore.timelineSelectionDate(for: proposedDate)
+                selectedTimelineDate = nextSelectionDate
+                updateGranularScrubFeedback(for: nextSelectionDate)
+            }
+            .onEnded { _ in
+                granularScrubStartDate = nil
+                granularScrubCurrentFrameID = nil
+            }
+    }
+
+    private func updateGranularScrubFeedback(for date: Date) {
+        guard let frame = timelineStore.timelineFrame(for: date), frame.id != granularScrubCurrentFrameID else {
+            return
+        }
+
+        granularScrubCurrentFrameID = frame.id
+        granularScrubFeedbackID += 1
+    }
+
+    private var scrubberProtectedInsets: EdgeInsets {
+        EdgeInsets(top: 0, leading: 0, bottom: 96, trailing: 0)
+    }
+
+    private static let searchTransitionID = "today-search"
+    private static let settingsTransitionID = "today-settings"
+    private static let captureTransitionID = "today-capture"
+    private static let nowSelectionTolerance: TimeInterval = 3
+    private static let granularScrubSecondsPerPoint: TimeInterval = 0.18
+
+    private static func isNow(_ date: Date) -> Bool {
+        abs(date.timeIntervalSince(.now)) <= nowSelectionTolerance
     }
 }
 
@@ -158,7 +277,9 @@ struct Today: View {
 private struct LiveMemorySurface: View {
     let liveStore: RewindLiveStore
     let timelineStore: CaptureTimelineStore
+    let timelineFrame: CachedCaptureFrame?
     let latestLocalFrame: CachedCaptureFrame?
+    let prefersCameraPreview: Bool
 
     var body: some View {
         ZStack {
@@ -168,29 +289,17 @@ private struct LiveMemorySurface: View {
             LiveSaveRipple(saveWaveID: liveStore.saveWaveID)
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
-
-            VStack {
-                LiveStatusPill(status: liveStore.status, isLive: liveStore.isLive)
-                    .padding(.top, 12)
-
-                Spacer()
-
-                if liveStore.isSaving, let request = liveStore.currentSaveRequest {
-                    SavingMemoryBanner(title: request.title)
-                        .padding(.bottom, 8)
-                } else if let latestAgentText = liveStore.latestAgentText {
-                    AgentMessageBanner(text: latestAgentText)
-                        .padding(.bottom, 8)
-                }
-            }
-            .padding(.horizontal)
         }
     }
 
     @ViewBuilder
     private var memorySurface: some View {
 #if os(iOS)
-        if prefersLiveCameraSurface {
+        if prefersCameraPreview, canShowCameraPreview {
+            PhoneCameraPreviewSurface(session: liveStore.captureController.previewSession)
+        } else if let timelineFrame {
+            MemoryImageSurface(imageSource: .file(url: timelineFrame.fileURL))
+        } else if prefersLiveCameraSurface {
             PhoneCameraPreviewSurface(session: liveStore.captureController.previewSession)
         } else if let latestLocalFrame {
             MemoryImageSurface(imageSource: .file(url: latestLocalFrame.fileURL))
@@ -202,7 +311,9 @@ private struct LiveMemorySurface: View {
             EmptyMemorySurface()
         }
 #else
-        if let latestLocalFrame {
+        if let timelineFrame {
+            MemoryImageSurface(imageSource: .file(url: timelineFrame.fileURL))
+        } else if let latestLocalFrame {
             MemoryImageSurface(imageSource: .file(url: latestLocalFrame.fileURL))
         } else if let frame = timelineStore.frames.last {
             MemoryImageSurface(imageSource: .file(url: frame.fileURL))
@@ -214,9 +325,18 @@ private struct LiveMemorySurface: View {
 
     private var prefersLiveCameraSurface: Bool {
         switch liveStore.captureController.state {
-        case .requestingAccess, .running:
+        case .running:
             true
-        case .idle, .stopping, .failed:
+        case .idle, .requestingAccess, .stopping, .failed:
+            false
+        }
+    }
+
+    private var canShowCameraPreview: Bool {
+        switch liveStore.captureController.state {
+        case .running:
+            true
+        case .idle, .requestingAccess, .stopping, .failed:
             false
         }
     }
@@ -272,9 +392,9 @@ private struct LiveSaveRipple: View {
 
 private struct SearchExperience: View {
     @Binding var searchText: String
-    private let isFocused: FocusState<Bool>.Binding
+    @State private var requestSearchFocus = false
+    @State private var isSearchFieldFocused = false
     let isSearching: Bool
-    let query: String
     let errorMessage: String?
     let results: [RewindSearchResultCard]
     let focusOnAppear: Bool
@@ -283,9 +403,7 @@ private struct SearchExperience: View {
 
     init(
         searchText: Binding<String>,
-        isFocused: FocusState<Bool>.Binding,
         isSearching: Bool,
-        query: String,
         errorMessage: String?,
         results: [RewindSearchResultCard],
         focusOnAppear: Bool,
@@ -293,9 +411,7 @@ private struct SearchExperience: View {
         onSubmit: @escaping () -> Void
     ) {
         self._searchText = searchText
-        self.isFocused = isFocused
         self.isSearching = isSearching
-        self.query = query
         self.errorMessage = errorMessage
         self.results = results
         self.focusOnAppear = focusOnAppear
@@ -306,7 +422,6 @@ private struct SearchExperience: View {
     var body: some View {
         NavigationStack {
             SearchResultsSurface(
-                query: query,
                 isSearching: isSearching,
                 errorMessage: errorMessage,
                 results: results
@@ -321,17 +436,20 @@ private struct SearchExperience: View {
             .safeAreaInset(edge: .bottom) {
                 SearchBar(
                     searchText: $searchText,
-                    isFocused: isFocused,
+                    requestFocus: $requestSearchFocus,
+                    isFocused: $isSearchFieldFocused,
                     isBusy: isSearching,
                     onSubmit: onSubmit
                 )
                 .padding()
-                .background(.black.opacity(0.92))
             }
         }
-        .task {
+        .background(.black)
+        .preferredColorScheme(.dark)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .task(id: focusOnAppear) {
             if focusOnAppear {
-                isFocused.wrappedValue = true
+                requestSearchFocus = true
             }
         }
     }
@@ -349,98 +467,14 @@ private struct EmptyMemorySurface: View {
     }
 }
 
-private struct LiveStatusPill: View {
-    let status: LiveStatus
-    let isLive: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: isLive ? "waveform" : "antenna.radiowaves.left.and.right")
-                .symbolEffect(.pulse, isActive: isLive)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(status.title)
-                    .font(.caption.weight(.bold))
-
-                Text(status.detail)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.regularMaterial, in: Capsule())
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-    }
-}
-
-private struct SavingMemoryBanner: View {
-    let title: String
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "sparkles")
-                .symbolEffect(.variableColor.iterative, options: .repeating)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Saving memory")
-                    .font(.subheadline.weight(.semibold))
-
-                Text(title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Spacer()
-        }
-        .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-}
-
-private struct AgentMessageBanner: View {
-    let text: String
-
-    var body: some View {
-        Text(text)
-            .font(.subheadline.weight(.medium))
-            .lineLimit(2)
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-}
-
 private struct SearchResultsSurface: View {
-    let query: String
     let isSearching: Bool
     let errorMessage: String?
     let results: [RewindSearchResultCard]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(isSearching ? "Searching" : "Results")
-                    .font(.title.weight(.bold))
-                    .foregroundStyle(.white)
-
-                if !query.isEmpty {
-                    Text(query)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal)
-            .padding(.top, 16)
-
-            if isSearching {
-                ProgressView()
-                    .tint(.white)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let errorMessage {
+            if let errorMessage {
                 ContentUnavailableView {
                     Label("Search unavailable", systemImage: "magnifyingglass")
                 } description: {
@@ -449,9 +483,18 @@ private struct SearchResultsSurface: View {
                 .foregroundStyle(.white)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if results.isEmpty {
-                ContentUnavailableView("No results", systemImage: "magnifyingglass")
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if isSearching {
+                    Color.clear
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ContentUnavailableView {
+                        Label("Search any moment", systemImage: "magnifyingglass")
+                    } description: {
+                        Text("Try a place, object, person, or something that happened earlier.")
+                    }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             } else {
                 ScrollView {
                     LazyVGrid(columns: gridColumns, spacing: 12) {
@@ -465,7 +508,7 @@ private struct SearchResultsSurface: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(.black)
+        .background(.clear)
     }
 
     private var gridColumns: [GridItem] {
@@ -480,108 +523,38 @@ private struct SearchResultTile: View {
     let result: RewindSearchResultCard
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack(alignment: .bottomLeading) {
-                resultImage
-                    .aspectRatio(0.78, contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        ZStack(alignment: .bottomLeading) {
+            resultImage
 
-                LinearGradient(
-                    colors: [.clear, .black.opacity(0.72)],
-                    startPoint: .center,
-                    endPoint: .bottom
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.12), .black.opacity(0.78)],
+                startPoint: .center,
+                endPoint: .bottom
+            )
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(result.title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-
-                    if !result.entities.isEmpty {
-                        Text(result.entities.prefix(2).joined(separator: " · "))
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.white.opacity(0.76))
-                            .lineLimit(1)
-                    }
-                }
-                .padding(10)
-            }
-
-            Text(result.description)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Text(result.title)
+                .font(.system(.title3, design: .rounded).weight(.semibold))
+                .foregroundStyle(.white)
                 .lineLimit(2)
+                .padding(.horizontal, 22)
+                .padding(.bottom, 20)
         }
+        .aspectRatio(0.78, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
         .accessibilityElement(children: .combine)
+        .accessibilityLabel(result.title)
     }
 
     @ViewBuilder
     private var resultImage: some View {
         if !result.frameURLs.isEmpty {
-            LoopingMemoryFrameWindow(frameURLs: result.frameURLs)
+            LoopingSearchResultMemoryCard(frameURLs: result.frameURLs, cornerRadius: Self.cornerRadius)
         } else {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
                 .fill(.white.opacity(0.08))
-                .overlay {
-                    Image(systemName: "photo")
-                        .font(.title2)
-                        .foregroundStyle(.secondary)
-                }
-        }
-    }
-}
-
-private struct LoopingMemoryFrameWindow: View {
-    let frameURLs: [URL]
-    @State private var selectedFrameIndex = 0
-
-    var body: some View {
-        ZStack {
-            if let frameURL = currentFrameURL {
-                MemoryImage(source: .file(url: frameURL))
-                    .id(frameURL)
-                    .transition(.opacity)
-            }
-        }
-        .task(id: frameURLs) {
-            await loopFrames()
-        }
-        .onChange(of: frameURLs) { _, _ in
-            selectedFrameIndex = 0
         }
     }
 
-    private var currentFrameURL: URL? {
-        guard !frameURLs.isEmpty else {
-            return nil
-        }
-
-        return frameURLs[min(selectedFrameIndex, frameURLs.count - 1)]
-    }
-
-    @MainActor
-    private func loopFrames() async {
-        guard frameURLs.count > 1 else {
-            selectedFrameIndex = 0
-            return
-        }
-
-        while !Task.isCancelled {
-            do {
-                try await Task.sleep(for: .milliseconds(420))
-            } catch {
-                return
-            }
-
-            guard !Task.isCancelled else {
-                return
-            }
-
-            withAnimation(.easeInOut(duration: 0.18)) {
-                selectedFrameIndex = (selectedFrameIndex + 1) % frameURLs.count
-            }
-        }
-    }
+    private static let cornerRadius: CGFloat = 44
 }

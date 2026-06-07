@@ -14,6 +14,7 @@ import SwiftUI
 /// tracking, and visual thumb feedback.
 struct Scrubber: View {
     @Binding private var selection: Date
+    @Binding private var externalIsScrubbing: Bool
 
     private let startDate: Date
     private let endDate: Date
@@ -26,10 +27,16 @@ struct Scrubber: View {
     @State private var feedbackStep: Int
     @State private var selectionFollowsCurrentTime: Bool
     @State private var currentDate = Date.now
+    @State private var scrubInteractionFeedbackID = 0
+    @State private var isDragActive = false
+    // During drag, the thumb follows the stitched recording-time position while
+    // the bound selection still resolves to a real timestamp.
+    @State private var visualScrubDate: Date?
     @GestureState private var isScrubbing = false
 
     init(
         selection: Binding<Date>,
+        isScrubbing: Binding<Bool> = .constant(false),
         startDate: Date,
         endDate: Date,
         availableIntervals: [DateInterval] = [],
@@ -37,6 +44,7 @@ struct Scrubber: View {
         calendar: Calendar = .current
     ) {
         self._selection = selection
+        self._externalIsScrubbing = isScrubbing
         self.startDate = startDate
         self.endDate = endDate
         self.availableIntervals = availableIntervals
@@ -54,7 +62,7 @@ struct Scrubber: View {
             initialValue: Self.feedbackStep(
                 for: selection.wrappedValue,
                 from: startDate,
-                interval: timelineScale.majorInterval
+                interval: timelineScale.minorInterval
             )
         )
         self._selectionFollowsCurrentTime = State(initialValue: availableIntervals.isEmpty)
@@ -69,12 +77,10 @@ struct Scrubber: View {
             )
             let activeSelection = activeSelection(currentDate: currentDate)
             let selectionY = yPosition(for: activeSelection, in: metrics)
-            let currentY = isDateInRange(currentDate) ? yPosition(for: currentDate, in: metrics) : nil
+            let currentY = isDateInRange(currentDate) && hasCaptureData(around: currentDate) ? yPosition(for: currentDate, in: metrics) : nil
 
             ZStack(alignment: .topTrailing) {
-                markProtectionGradient(in: metrics, isScrubbing: isScrubbing)
-
-                gapIndicators(in: metrics)
+//                markProtectionGradient(in: metrics, isScrubbing: isScrubbing)
 
                 marks(
                     activeY: selectionY,
@@ -96,12 +102,18 @@ struct Scrubber: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Time scrubber")
             .accessibilityValue(accessibilityValue(for: activeSelection, currentDate: currentDate))
+            .onDisappear {
+                externalIsScrubbing = false
+                isDragActive = false
+                visualScrubDate = nil
+            }
         }
         .task {
             await updateCurrentTimeEveryMinute()
         }
         .frame(width: 116)
         .sensoryFeedback(.selection, trigger: feedbackStep)
+        .sensoryFeedback(.impact(weight: .light, intensity: 0.45), trigger: scrubInteractionFeedbackID)
     }
 
     private func markProtectionGradient(in metrics: ScrubberMetrics, isScrubbing: Bool) -> some View {
@@ -119,32 +131,6 @@ struct Scrubber: View {
             y: metrics.size.height / 2
         )
         .animation(.smooth(duration: 0.18), value: isScrubbing)
-        .allowsHitTesting(false)
-    }
-
-    private func gapIndicators(in metrics: ScrubberMetrics) -> some View {
-        ZStack(alignment: .topTrailing) {
-            ForEach(timelineLayout.gapSegments, id: \.id) { segment in
-                let startY = yPosition(for: segment.startDate, in: metrics)
-                let endY = yPosition(for: segment.endDate, in: metrics)
-                let height = max(0, endY - startY)
-                let midY = startY + height / 2
-
-                if height >= 4 {
-                    ForEach(0..<3, id: \.self) { dotIndex in
-                        Circle()
-                            .fill(.white.opacity(0.34))
-                            .frame(width: ScrubberMetrics.gapDotSize, height: ScrubberMetrics.gapDotSize)
-                            .position(
-                                x: metrics.gapDotLeadingX
-                                    + CGFloat(dotIndex) * (ScrubberMetrics.gapDotSize + ScrubberMetrics.gapDotSpacing)
-                                    + ScrubberMetrics.gapDotSize / 2,
-                                y: midY
-                            )
-                    }
-                }
-            }
-        }
         .allowsHitTesting(false)
     }
 
@@ -167,12 +153,11 @@ struct Scrubber: View {
                     distanceFromActiveSelection: abs(y - activeY),
                     isScrubbing: isScrubbing
                 )
-                let dataOpacity = hasCaptureData(around: mark.date) ? 1.0 : 0.22
 
                 Capsule()
-                    .fill(mark.isMajor ? .white.opacity(0.6) : .white.opacity(0.3))
+                    .fill(mark.isMajor ? .white.opacity(0.8) : .white.opacity(0.5))
                     .frame(width: presentation.width, height: presentation.height)
-                    .opacity(hidesMark ? 0 : dataOpacity)
+                    .opacity(hidesMark ? 0 : 1)
                     .position(x: presentation.centerX, y: y)
                     .animation(.smooth(duration: 0.18), value: isScrubbing)
 
@@ -184,12 +169,12 @@ struct Scrubber: View {
 
                     Text(timelineScale.label(for: mark.date))
                         .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(.white.opacity(0.8))
                         .monospacedDigit()
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                         .frame(width: ScrubberMetrics.hourLabelWidth, alignment: .trailing)
-                        .opacity(isScrubbing && !hidesText ? dataOpacity : 0)
+                        .opacity(isScrubbing && !hidesText ? 1 : 0)
                         .position(x: presentation.labelCenterX, y: y)
                         .transition(.move(edge: .trailing))
                         .animation(.smooth(duration: 0.18), value: isScrubbing)
@@ -201,7 +186,7 @@ struct Scrubber: View {
     private func nowIndicator(at y: CGFloat, isScrubbing: Bool, in metrics: ScrubberMetrics) -> some View {
         ZStack(alignment: .topTrailing) {
             Capsule()
-                .fill(.white.opacity(0.82))
+                .fill(.white.opacity(1))
                 .frame(width: ScrubberMetrics.nowMarkWidth, height: ScrubberMetrics.markHeight)
                 .position(x: metrics.nowMarkCenterX, y: y)
 
@@ -217,14 +202,14 @@ struct Scrubber: View {
 
     private func scrubberPill(for date: Date, currentDate: Date) -> some View {
         Text(scrubberTitle(for: date, currentDate: currentDate))
-            .font(.system(size: 17, weight: .bold, design: .rounded))
+            .font(.system(size: 17, weight: .semibold, design: .rounded))
             .monospacedDigit()
             .lineLimit(1)
             .minimumScaleFactor(0.72)
             .transaction { transaction in
                 transaction.animation = nil
             }
-        .foregroundStyle(.white)
+        .foregroundStyle(.primary)
         .padding(.horizontal)
         .padding(.vertical, 8)
         .glassEffect(.regular.interactive(), in: Capsule())
@@ -236,34 +221,40 @@ struct Scrubber: View {
                 state = true
             }
             .onChanged { value in
+                externalIsScrubbing = true
+                beginScrubInteractionIfNeeded()
+                let proposedDate = date(for: value.location.y, in: metrics)
                 let nextSelection = snappedSelection(
-                    for: value.location.y,
-                    in: metrics,
+                    for: proposedDate,
                     currentDate: currentDate
                 )
+                visualScrubDate = min(proposedDate, currentDate)
                 selectionFollowsCurrentTime = false
-                updateSelection(nextSelection.date)
+                updateSelection(nextSelection)
 
                 let nextStep = Self.feedbackStep(
-                    for: nextSelection.date,
+                    for: nextSelection,
                     from: startDate,
-                    interval: timelineScale.majorInterval
+                    interval: timelineScale.minorInterval
                 )
                 if nextStep != feedbackStep {
                     feedbackStep = nextStep
                 }
             }
             .onEnded { value in
+                externalIsScrubbing = false
+                endScrubInteractionIfNeeded()
+                let proposedDate = date(for: value.location.y, in: metrics)
                 let nextSelection = snappedSelection(
-                    for: value.location.y,
-                    in: metrics,
+                    for: proposedDate,
                     currentDate: currentDate
                 )
+                visualScrubDate = nil
                 selectionFollowsCurrentTime = Self.isCurrentMinute(
-                    nextSelection.date,
+                    nextSelection,
                     comparedTo: currentDate,
                     calendar: calendar
-                ) && availableIntervals.isEmpty
+                )
 
                 if selectionFollowsCurrentTime {
                     updateSelection(clamped(currentDate))
@@ -271,31 +262,81 @@ struct Scrubber: View {
             }
     }
 
+    private func beginScrubInteractionIfNeeded() {
+        guard !isDragActive else {
+            return
+        }
+
+        isDragActive = true
+        scrubInteractionFeedbackID += 1
+    }
+
+    private func endScrubInteractionIfNeeded() {
+        guard isDragActive else {
+            return
+        }
+
+        isDragActive = false
+        scrubInteractionFeedbackID += 1
+    }
+
     private var timelineMarks: [TimelineMark] {
         guard endDate > startDate else {
             return []
         }
 
-        let startInterval = startDate.timeIntervalSinceReferenceDate
-        let endInterval = endDate.timeIntervalSinceReferenceDate
         let minorInterval = timelineScale.minorInterval
         let majorInterval = timelineScale.majorInterval
-        let firstMarkInterval = floor(startInterval / minorInterval) * minorInterval
+        var usedIntervals = Set<Int>()
+        var marks: [TimelineMark] = []
 
-        return stride(from: firstMarkInterval, through: endInterval, by: minorInterval).compactMap { interval in
-            let date = Date(timeIntervalSinceReferenceDate: interval)
-            guard date >= startDate, date <= endDate else {
-                return nil
+        for segment in timelineLayout.recordedSegments {
+            let segmentStart = segment.startDate.timeIntervalSinceReferenceDate
+            let segmentEnd = segment.endDate.timeIntervalSinceReferenceDate
+            let firstMarkInterval = ceil(segmentStart / minorInterval) * minorInterval
+
+            appendTimelineMark(
+                at: segmentStart,
+                majorInterval: majorInterval,
+                usedIntervals: &usedIntervals,
+                marks: &marks
+            )
+
+            if firstMarkInterval <= segmentEnd {
+                for interval in stride(from: firstMarkInterval, through: segmentEnd, by: minorInterval) {
+                    appendTimelineMark(
+                        at: interval,
+                        majorInterval: majorInterval,
+                        usedIntervals: &usedIntervals,
+                        marks: &marks
+                    )
+                }
             }
-            guard availableIntervals.isEmpty || hasCaptureData(around: date) else {
-                return nil
-            }
 
-            let offset = interval - firstMarkInterval
-            let isMajor = offset.truncatingRemainder(dividingBy: majorInterval) < 0.5
-
-            return TimelineMark(date: date, isMajor: isMajor)
+            appendTimelineMark(
+                at: segmentEnd,
+                majorInterval: majorInterval,
+                usedIntervals: &usedIntervals,
+                marks: &marks
+            )
         }
+
+        return marks.sorted { $0.date < $1.date }
+    }
+
+    private func appendTimelineMark(
+        at interval: TimeInterval,
+        majorInterval: TimeInterval,
+        usedIntervals: inout Set<Int>,
+        marks: inout [TimelineMark]
+    ) {
+        let roundedInterval = Int(interval.rounded())
+        guard usedIntervals.insert(roundedInterval).inserted else {
+            return
+        }
+
+        let isMajor = interval.truncatingRemainder(dividingBy: majorInterval) < 0.5
+        marks.append(TimelineMark(date: Date(timeIntervalSinceReferenceDate: interval), isMajor: isMajor))
     }
 
     private func yPosition(for date: Date, in metrics: ScrubberMetrics) -> CGFloat {
@@ -322,17 +363,29 @@ struct Scrubber: View {
         selection = nextSelection
     }
 
-    private func snappedSelection(
-        for dragY: CGFloat,
-        in metrics: ScrubberMetrics,
-        currentDate: Date
-    ) -> (date: Date, didSnap: Bool) {
-        let rawDate = date(for: dragY, in: metrics)
-        if let nearestCaptureDate = nearestAvailableCapture(to: rawDate) {
-            return (nearestCaptureDate, !calendar.isDate(rawDate, equalTo: nearestCaptureDate, toGranularity: .second))
+    private func snappedSelection(for date: Date, currentDate: Date) -> Date {
+        if date >= currentDate || Self.isCurrentMinute(date, comparedTo: currentDate, calendar: calendar) {
+            return clamped(currentDate)
         }
 
-        return (rawDate, false)
+        guard !availableIntervals.isEmpty else {
+            return date
+        }
+
+        let clampedDate = clamped(date)
+        if hasCaptureData(around: clampedDate) {
+            return clampedDate
+        }
+
+        if let nextInterval = availableIntervals.first(where: { $0.start > clampedDate }) {
+            return clamped(nextInterval.start)
+        }
+
+        if let previousInterval = availableIntervals.last(where: { $0.end < clampedDate }) {
+            return clamped(previousInterval.end)
+        }
+
+        return clampedDate
     }
 
     private func shouldHideTimelineMark(
@@ -376,54 +429,11 @@ struct Scrubber: View {
         }
     }
 
-    private func nearestAvailableCapture(to date: Date) -> Date? {
-        guard !availableIntervals.isEmpty else {
-            return nil
-        }
-
-        let clampedDate = clamped(date)
-        let nearestDate = nearestAvailableDate(to: clampedDate)
-        guard let nearestDate else {
-            return nil
-        }
-
-        return calendar.date(
-            bySetting: .nanosecond,
-            value: 0,
-            of: clamped(nearestDate)
-        ) ?? clamped(nearestDate)
-    }
-
-    private func nearestDate(to date: Date, in interval: DateInterval) -> Date {
-        if date <= interval.start {
-            return interval.start
-        }
-
-        if date >= interval.end {
-            return interval.end
-        }
-
-        return date
-    }
-
-    private func nearestAvailableDate(to date: Date) -> Date? {
-        var bestDate: Date?
-        var nearestDistance = TimeInterval.greatestFiniteMagnitude
-
-        for interval in availableIntervals {
-            let candidate = nearestDate(to: date, in: interval)
-            let distance = abs(candidate.timeIntervalSince(date))
-
-            if distance < nearestDistance {
-                bestDate = candidate
-                nearestDistance = distance
-            }
-        }
-
-        return bestDate
-    }
-
     private func activeSelection(currentDate: Date) -> Date {
+        if let visualScrubDate {
+            return clamped(visualScrubDate)
+        }
+
         if selectionFollowsCurrentTime, !isScrubbing {
             return clamped(currentDate)
         }
@@ -539,14 +549,6 @@ private struct ScrubberMetrics {
         nowMarkCenterX - Self.nowMarkWidth / 2 - Self.nowLabelSpacing - Self.nowLabelWidth / 2
     }
 
-    var gapDotLeadingX: CGFloat {
-        gapDotTrailingX - Self.gapDotTotalWidth
-    }
-
-    private var gapDotTrailingX: CGFloat {
-        width - Self.baseMarkTrailingOffset
-    }
-
     func presentation(
         for mark: TimelineMark,
         distanceFromActiveSelection distance: CGFloat,
@@ -587,9 +589,6 @@ private struct ScrubberMetrics {
     private static let morphRadius: CGFloat = 92
     private static let nowLabelSpacing: CGFloat = 6
     private static let hourLabelSpacing: CGFloat = 6
-    fileprivate static let gapDotSize: CGFloat = 2
-    fileprivate static let gapDotSpacing: CGFloat = 2
-    private static let gapDotTotalWidth = gapDotSize * 3 + gapDotSpacing * 2
     private static let restingProtectionWidth: CGFloat = 76
     private static let expandedProtectionWidth: CGFloat = 166
     fileprivate static let hourLabelWidth: CGFloat = 70
@@ -611,13 +610,12 @@ private struct TimelineMark: Identifiable {
 private struct TimelineLayout {
     let segments: [TimelineSegment]
 
-    var gapSegments: [TimelineSegment] {
-        segments.filter { !$0.isAvailable }
+    var recordedSegments: [TimelineSegment] {
+        segments
     }
 
     var recordedDuration: TimeInterval {
         let duration = segments
-            .filter(\.isAvailable)
             .reduce(0) { partialResult, segment in
                 partialResult + segment.realDuration
             }
@@ -663,21 +661,11 @@ private struct TimelineLayout {
         }
 
         var nextDisplayStart: TimeInterval = 0
-        var nextRealStart = startDate
         var segments: [TimelineSegment] = []
 
+        // Demo captures are sparse, so the scrubber bends time by stitching
+        // recorded intervals together and allocating no visual space to gaps.
         for interval in normalizedIntervals {
-            if interval.start > nextRealStart {
-                let gapSegment = Self.segment(
-                    startDate: nextRealStart,
-                    endDate: interval.start,
-                    displayStart: nextDisplayStart,
-                    isAvailable: false
-                )
-                segments.append(gapSegment)
-                nextDisplayStart = gapSegment.displayEnd
-            }
-
             let availableSegment = Self.segment(
                 startDate: interval.start,
                 endDate: interval.end,
@@ -686,17 +674,6 @@ private struct TimelineLayout {
             )
             segments.append(availableSegment)
             nextDisplayStart = availableSegment.displayEnd
-            nextRealStart = interval.end
-        }
-
-        if nextRealStart < endDate {
-            let gapSegment = Self.segment(
-                startDate: nextRealStart,
-                endDate: endDate,
-                displayStart: nextDisplayStart,
-                isAvailable: false
-            )
-            segments.append(gapSegment)
         }
 
         self.segments = segments
@@ -720,13 +697,7 @@ private struct TimelineLayout {
     private func segment(containing date: Date) -> TimelineSegment {
         segments.first { segment in
             date >= segment.startDate && date <= segment.endDate
-        } ?? segments.last ?? TimelineSegment(
-            startDate: date,
-            endDate: date.addingTimeInterval(1),
-            displayStart: 0,
-            displayDuration: 1,
-            isAvailable: true
-        )
+        } ?? nearestSegment(to: date)
     }
 
     private func segment(containingDisplayOffset displayOffset: TimeInterval) -> TimelineSegment {
@@ -739,6 +710,34 @@ private struct TimelineLayout {
             displayDuration: 1,
             isAvailable: true
         )
+    }
+
+    private func nearestSegment(to date: Date) -> TimelineSegment {
+        guard let firstSegment = segments.first else {
+            return TimelineSegment(
+                startDate: date,
+                endDate: date.addingTimeInterval(1),
+                displayStart: 0,
+                displayDuration: 1,
+                isAvailable: true
+            )
+        }
+
+        var nearestSegment = firstSegment
+        var nearestDistance = TimeInterval.greatestFiniteMagnitude
+
+        for segment in segments {
+            let distance = min(
+                abs(date.timeIntervalSince(segment.startDate)),
+                abs(date.timeIntervalSince(segment.endDate))
+            )
+            if distance < nearestDistance {
+                nearestDistance = distance
+                nearestSegment = segment
+            }
+        }
+
+        return nearestSegment
     }
 
     private static func normalizedIntervals(
@@ -784,25 +783,14 @@ private struct TimelineLayout {
         isAvailable: Bool
     ) -> TimelineSegment {
         let realDuration = max(1, endDate.timeIntervalSince(startDate))
-        let displayDuration: TimeInterval
-        if isAvailable {
-            displayDuration = realDuration
-        } else {
-            displayDuration = min(max(realDuration * unavailableCompressionFactor, minimumGapDisplayDuration), maximumGapDisplayDuration)
-        }
-
         return TimelineSegment(
             startDate: startDate,
             endDate: endDate,
             displayStart: displayStart,
-            displayDuration: displayDuration,
+            displayDuration: realDuration,
             isAvailable: isAvailable
         )
     }
-
-    private static let unavailableCompressionFactor: TimeInterval = 0.08
-    private static let minimumGapDisplayDuration: TimeInterval = 6
-    private static let maximumGapDisplayDuration: TimeInterval = 90
 }
 
 private struct TimelineSegment: Identifiable {

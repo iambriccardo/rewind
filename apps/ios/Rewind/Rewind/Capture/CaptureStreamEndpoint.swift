@@ -19,6 +19,7 @@ actor CaptureStreamEndpoint {
     private let configuration: RewindConfiguration
     private let client: RewindProtocolClient
     private let frameBuffer: RollingFrameBuffer
+    private let frameCache: CaptureFrameCache
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "app.vogelhaus.Rewind",
         category: "CaptureStreamEndpoint"
@@ -31,11 +32,16 @@ actor CaptureStreamEndpoint {
     init(
         configuration: RewindConfiguration = .defaultConfiguration,
         client: RewindProtocolClient? = nil,
-        frameBuffer: RollingFrameBuffer = RollingFrameBuffer()
+        frameBuffer: RollingFrameBuffer = RollingFrameBuffer(
+            maximumFrames: 140,
+            maximumAge: 20
+        ),
+        frameCache: CaptureFrameCache = .shared
     ) {
         self.configuration = configuration
         self.client = client ?? RewindProtocolClient(configuration: configuration)
         self.frameBuffer = frameBuffer
+        self.frameCache = frameCache
         self.events = self.client.events
     }
 
@@ -103,17 +109,10 @@ actor CaptureStreamEndpoint {
             return
         }
 
-        let bufferedFrame = RewindBufferedFrame(
-            id: frame.deviceFrameUUID,
-            capturedAt: frame.timestamp,
-            width: frame.width,
-            height: frame.height,
-            jpegData: frame.data
-        )
-        await frameBuffer.append(bufferedFrame)
+        await frameBuffer.append(frame.bufferedFrame)
 
         do {
-            try await client.sendImageFrame(bufferedFrame)
+            try await client.sendImageFrame(frame.bufferedFrame)
         } catch {
             logger.error("Failed to stream image frame: \(error.localizedDescription, privacy: .public)")
         }
@@ -149,6 +148,7 @@ actor CaptureStreamEndpoint {
 
     func commit(_ request: RewindSaveRequest, location: RewindCapturedLocation?) async {
         let window = captureWindow(for: request)
+        await waitForCaptureWindowIfNeeded(window)
         let frames = await frameBuffer.selectFrames(window: window)
 
         do {
@@ -158,6 +158,7 @@ actor CaptureStreamEndpoint {
                 frames: frames,
                 location: location
             )
+            await persistSavedMemoryFrames(frames, eventID: request.eventID, sessionID: activeSessionID)
         } catch {
             await client.reportFailure(error.localizedDescription)
             logger.error("Failed to commit rewind frames: \(error.localizedDescription, privacy: .public)")
@@ -183,18 +184,16 @@ actor CaptureStreamEndpoint {
     }
 
     private func captureWindow(for request: RewindSaveRequest) -> RewindCaptureWindow {
-        let maximumDurationMs = activeSession?.rewindBufferDurationMilliseconds ?? 60_000
-        let requestedDurationMs = request.captureDurationMs ?? max(1, request.rewindDurationSeconds) * 1_000
-        let durationMs = min(maximumDurationMs, max(1, requestedDurationMs))
-        let endedAt = Self.date(from: request.captureAnchorUTC)
+        let anchor = Self.date(from: request.captureAnchorUTC)
             ?? Self.date(from: request.captureWindowEndedAt)
             ?? Date()
-        let startedAt = Self.date(from: request.captureWindowStartedAt)
-            ?? endedAt.addingTimeInterval(-TimeInterval(durationMs) / 1_000)
+        let startedAt = anchor.addingTimeInterval(-Self.savedMemoryPreRoll)
+        let endedAt = anchor.addingTimeInterval(Self.savedMemoryPostRoll)
+        let durationMs = Int((Self.savedMemoryPreRoll + Self.savedMemoryPostRoll) * 1_000)
         let frameIntervalMilliseconds = activeSession?.deviceFrameIntervalMilliseconds ?? 1_000
 
         return RewindCaptureWindow(
-            anchorUTC: ISO8601DateFormatter.rewindProtocol.string(from: endedAt),
+            anchorUTC: ISO8601DateFormatter.rewindProtocol.string(from: anchor),
             durationMs: durationMs,
             startedAt: startedAt,
             endedAt: endedAt,
@@ -204,9 +203,45 @@ actor CaptureStreamEndpoint {
         )
     }
 
+    private func waitForCaptureWindowIfNeeded(_ window: RewindCaptureWindow) async {
+        let remainingDuration = window.endedAt.timeIntervalSince(Date())
+        guard remainingDuration > 0 else {
+            return
+        }
+
+        do {
+            try await Task.sleep(for: .seconds(remainingDuration))
+        } catch {}
+    }
+
+    private func persistSavedMemoryFrames(_ frames: [RewindBufferedFrame], eventID: String, sessionID: UUID?) async {
+        guard let sessionID, !frames.isEmpty else {
+            return
+        }
+
+        let deviceFrames = frames.enumerated().map { index, frame in
+            DeviceCaptureFrame(
+                deviceFrameUUID: frame.id,
+                memoryEventID: eventID,
+                sessionID: sessionID,
+                sequenceNumber: index + 1,
+                timestamp: frame.capturedAt,
+                width: frame.width,
+                height: frame.height,
+                data: frame.jpegData,
+                fileExtension: "jpg"
+            )
+        }
+
+        _ = await frameCache.storeMemoryFrames(deviceFrames)
+    }
+
     private nonisolated static func date(from value: String?) -> Date? {
         value.flatMap { ISO8601DateFormatter.rewindProtocol.date(from: $0) }
     }
+
+    private static let savedMemoryPreRoll: TimeInterval = 5
+    private static let savedMemoryPostRoll: TimeInterval = 5
 }
 
 /// Metadata for a single capture stream session.
@@ -241,6 +276,16 @@ struct CaptureVideoFrame: Sendable {
     let height: Int
     let jpegQuality: Double
     let data: Data
+
+    var bufferedFrame: RewindBufferedFrame {
+        RewindBufferedFrame(
+            id: deviceFrameUUID,
+            capturedAt: timestamp,
+            width: width,
+            height: height,
+            jpegData: data
+        )
+    }
 }
 
 /// A PCM audio chunk produced by capture mode.

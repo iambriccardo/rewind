@@ -16,20 +16,20 @@ import OSLog
 actor RollingFrameBuffer {
     private var frames: [RewindBufferedFrame] = []
     private let maximumFrames: Int
+    private let maximumAge: TimeInterval?
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "app.vogelhaus.Rewind",
         category: "RollingFrameBuffer"
     )
 
-    init(maximumFrames: Int = 60) {
+    init(maximumFrames: Int = 60, maximumAge: TimeInterval? = nil) {
         self.maximumFrames = maximumFrames
+        self.maximumAge = maximumAge
     }
 
     func append(_ frame: RewindBufferedFrame) {
         frames.append(frame)
-        if frames.count > maximumFrames {
-            frames.removeFirst(frames.count - maximumFrames)
-        }
+        prune(now: frame.capturedAt)
     }
 
     func selectFrames(duration: TimeInterval) -> [RewindBufferedFrame] {
@@ -48,6 +48,7 @@ actor RollingFrameBuffer {
     }
 
     func selectFrames(window: RewindCaptureWindow) -> [RewindBufferedFrame] {
+        prune(now: Date())
         let selectedFrames = frames.filter { frame in
             frame.capturedAt >= window.startedAt && frame.capturedAt <= window.endedAt
         }
@@ -67,6 +68,17 @@ actor RollingFrameBuffer {
 
     func removeAll() {
         frames.removeAll()
+    }
+
+    private func prune(now: Date) {
+        if let maximumAge {
+            let cutoff = now.addingTimeInterval(-maximumAge)
+            frames.removeAll { $0.capturedAt < cutoff }
+        }
+
+        if frames.count > maximumFrames {
+            frames.removeFirst(frames.count - maximumFrames)
+        }
     }
 }
 
