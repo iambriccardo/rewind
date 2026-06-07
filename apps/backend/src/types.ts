@@ -60,6 +60,7 @@ export type RewindSearchResult = RewindEvent & {
   event_similarity?: number | null;
   frame_similarity?: number | null;
   text_rank?: number | null;
+  retrieval_score?: number | null;
   frames?: RewindFrame[];
 };
 
@@ -134,6 +135,7 @@ export type RewindProtocolResult = {
     event_similarity?: number | null;
     frame_similarity?: number | null;
     text_rank?: number | null;
+    retrieval_score?: number | null;
   };
   frame_refs: RewindFrameRef[];
 };

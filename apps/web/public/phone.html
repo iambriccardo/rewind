@@ -60,6 +60,7 @@
         display: none;
       }
       input,
+      select,
       button {
         border: 1px solid #34433e;
         background: #18201d;
@@ -68,9 +69,13 @@
         border-radius: 6px;
         font: inherit;
       }
-      input {
+      input,
+      select {
         flex: 1;
         padding: 0 12px;
+      }
+      select {
+        min-width: 220px;
       }
       input[type="number"] {
         flex: 0 0 auto;
@@ -81,7 +86,8 @@
         cursor: pointer;
       }
       button:disabled,
-      input:disabled {
+      input:disabled,
+      select:disabled {
         cursor: not-allowed;
         opacity: 0.48;
       }
@@ -375,6 +381,13 @@
         <div id="status" class="status" data-state="checking">Checking backend...</div>
         <div class="toolbar">
           <button id="stream" class="primary">Start Streaming</button>
+          <label class="setting">
+            Camera
+            <select id="cameraSelect">
+              <option value="">Default camera</option>
+            </select>
+          </label>
+          <button id="refreshCameras" type="button">Refresh Cameras</button>
         </div>
         <div id="streamControls" class="toolbar" hidden>
           <button id="hideVideo">Hide Camera</button>
@@ -433,6 +446,7 @@
       const BACKEND_HEALTH_INTERVAL_MS = 2500;
       const PLAYBACK_INTERVAL_MS = 450;
       const DEFAULT_BACKEND_URL = 'http://localhost:8787';
+      const CAMERA_DEVICE_STORAGE_KEY = 'rewind_camera_device_id';
       const webConfig = window.REWIND_WEB_CONFIG || {};
       window.RewindFrameCache ||= createRewindFrameCache();
 
@@ -444,6 +458,9 @@
         assets: new Map(),
         streaming: false,
         mediaStream: null,
+        cameraDevices: [],
+        selectedCameraId: localStorage.getItem(CAMERA_DEVICE_STORAGE_KEY) || '',
+        cameraRefreshing: false,
         frameStreamTimer: null,
         localCaptureTimer: null,
         mediaSeq: 0,
@@ -536,6 +553,8 @@
         placeholder: document.getElementById('placeholder'),
         canvas: document.getElementById('canvas'),
         stream: document.getElementById('stream'),
+        cameraSelect: document.getElementById('cameraSelect'),
+        refreshCameras: document.getElementById('refreshCameras'),
         streamControls: document.getElementById('streamControls'),
         hideVideo: document.getElementById('hideVideo'),
         muteAudio: document.getElementById('muteAudio'),
@@ -617,10 +636,9 @@
         }
 
         message.results.forEach((result, index) => {
-          const score = result.score?.similarity ?? result.score?.text_rank;
           const meta = [
             `${result.frame_refs?.length || 0} frames`,
-            score == null ? null : `score ${Number(score).toFixed(2)}`,
+            resultScoreLabel(result.score),
             result.location_hint || null
           ].filter(Boolean);
           const card = memoryCard({
@@ -638,6 +656,24 @@
           els.results.appendChild(card);
         });
         renderTimeline(await compileResultFrames(message.results[0]));
+      }
+
+      function resultScoreLabel(score) {
+        const retrievalScore = positiveScore(score?.retrieval_score);
+        if (retrievalScore !== null) return `rank ${retrievalScore.toFixed(2)}`;
+
+        const semanticScore = positiveScore(score?.similarity);
+        if (semanticScore !== null) return `semantic ${semanticScore.toFixed(2)}`;
+
+        const textRank = positiveScore(score?.text_rank);
+        if (textRank !== null) return `text ${textRank.toFixed(2)}`;
+
+        return null;
+      }
+
+      function positiveScore(value) {
+        const score = Number(value);
+        return Number.isFinite(score) && score >= 0.005 ? score : null;
       }
 
       function compileResultFrames(result) {
@@ -763,6 +799,7 @@
           url: location.href,
           secure_context: window.isSecureContext,
           media_devices_api: Boolean(navigator.mediaDevices?.getUserMedia),
+          enumerate_devices_api: Boolean(navigator.mediaDevices?.enumerateDevices),
           audio_context_api: Boolean(window.AudioContext || window.webkitAudioContext)
         };
         try {
@@ -782,6 +819,126 @@
           details.permission_query = 'unavailable';
         }
         log('Media readiness', details);
+      }
+
+      async function refreshCameraDevices({ preferCurrent = false } = {}) {
+        if (!navigator.mediaDevices?.enumerateDevices) {
+          state.cameraDevices = [];
+          renderCameraDevices();
+          return;
+        }
+        state.cameraRefreshing = true;
+        renderCameraDevices();
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          state.cameraDevices = devices.filter((device) => device.kind === 'videoinput');
+          const currentDeviceId = preferCurrent ? currentVideoDeviceId() : '';
+          if (currentDeviceId) state.selectedCameraId = currentDeviceId;
+          if (state.selectedCameraId && !state.cameraDevices.some((device) => device.deviceId === state.selectedCameraId)) {
+            state.selectedCameraId = '';
+            localStorage.removeItem(CAMERA_DEVICE_STORAGE_KEY);
+          }
+        } catch (error) {
+          log('Camera list unavailable', { error: error.message || String(error) });
+        } finally {
+          state.cameraRefreshing = false;
+          renderCameraDevices();
+        }
+      }
+
+      function renderCameraDevices() {
+        els.cameraSelect.innerHTML = '';
+        const defaultOption = document.createElement('option');
+        defaultOption.value = '';
+        defaultOption.textContent = state.cameraDevices.length ? 'Default camera' : 'Default camera / permission required';
+        els.cameraSelect.appendChild(defaultOption);
+
+        state.cameraDevices.forEach((device, index) => {
+          const option = document.createElement('option');
+          option.value = device.deviceId;
+          option.textContent = device.label || `Camera ${index + 1}`;
+          els.cameraSelect.appendChild(option);
+        });
+
+        els.cameraSelect.value = state.selectedCameraId;
+        const canEnumerate = Boolean(navigator.mediaDevices?.enumerateDevices);
+        els.cameraSelect.disabled = !canEnumerate || state.cameraRefreshing;
+        els.refreshCameras.disabled = !canEnumerate || state.cameraRefreshing;
+        els.refreshCameras.textContent = state.cameraRefreshing ? 'Refreshing' : 'Refresh Cameras';
+      }
+
+      function currentVideoDeviceId() {
+        return state.mediaStream?.getVideoTracks()[0]?.getSettings?.().deviceId || '';
+      }
+
+      function selectedVideoConstraints() {
+        const base = {
+          width: { ideal: MAX_FRAME_EDGE_PX },
+          height: { ideal: Math.round((MAX_FRAME_EDGE_PX * 3) / 4) },
+          frameRate: { ideal: 10, max: 15 }
+        };
+        if (state.selectedCameraId) {
+          return {
+            ...base,
+            deviceId: { exact: state.selectedCameraId }
+          };
+        }
+        return {
+          ...base,
+          facingMode: 'environment'
+        };
+      }
+
+      async function handleCameraSelection() {
+        const previousCameraId = state.selectedCameraId;
+        state.selectedCameraId = els.cameraSelect.value;
+        if (state.selectedCameraId) localStorage.setItem(CAMERA_DEVICE_STORAGE_KEY, state.selectedCameraId);
+        else localStorage.removeItem(CAMERA_DEVICE_STORAGE_KEY);
+
+        if (!state.streaming) return;
+        try {
+          await switchCamera();
+        } catch (error) {
+          state.selectedCameraId = previousCameraId;
+          if (previousCameraId) localStorage.setItem(CAMERA_DEVICE_STORAGE_KEY, previousCameraId);
+          else localStorage.removeItem(CAMERA_DEVICE_STORAGE_KEY);
+          renderCameraDevices();
+          const message = describeMediaError(error);
+          setStatus(`Camera switch failed: ${message}`, 'streaming');
+          log('Camera switch failed', { name: error.name, error: message });
+        }
+      }
+
+      async function switchCamera() {
+        if (!state.mediaStream) return;
+        setStatus('Switching camera...', 'streaming');
+        const videoOnlyStream = await withTimeout(
+          navigator.mediaDevices.getUserMedia({
+            video: selectedVideoConstraints(),
+            audio: false
+          }),
+          10000
+        );
+        const [videoTrack] = videoOnlyStream.getVideoTracks();
+        if (!videoTrack) throw new Error('No video track returned for selected camera.');
+
+        for (const oldTrack of state.mediaStream.getVideoTracks()) {
+          state.mediaStream.removeTrack(oldTrack);
+          oldTrack.stop();
+        }
+        videoTrack.enabled = !state.videoHidden;
+        state.mediaStream.addTrack(videoTrack);
+        els.video.srcObject = state.mediaStream;
+        await els.video.play();
+        await refreshCameraDevices({ preferCurrent: true });
+        if (!state.videoHidden) {
+          captureFrame();
+          sendFrameToAgent();
+          scheduleFrameStreaming();
+        }
+        const label = videoTrack.label || els.cameraSelect.selectedOptions[0]?.textContent || 'selected camera';
+        setStatus(`Streaming camera and microphone · ${label}`, 'streaming');
+        log('Camera switched', { camera: label, device_id: currentVideoDeviceId() || undefined });
       }
 
       function wsUrl() {
@@ -977,12 +1134,7 @@
         els.stream.disabled = true;
         const stream = await withTimeout(
           navigator.mediaDevices.getUserMedia({
-            video: {
-              width: { ideal: MAX_FRAME_EDGE_PX },
-              height: { ideal: Math.round((MAX_FRAME_EDGE_PX * 3) / 4) },
-              frameRate: { ideal: 10, max: 15 },
-              facingMode: 'environment'
-            },
+            video: selectedVideoConstraints(),
             audio: {
               echoCancellation: true,
               noiseSuppression: true,
@@ -993,6 +1145,7 @@
         );
         reportMediaReadiness();
         state.mediaStream = stream;
+        await refreshCameraDevices({ preferCurrent: true });
         els.video.srcObject = stream;
         await els.video.play();
         state.streaming = true;
@@ -1672,13 +1825,24 @@
           setStatus(`Streaming failed: ${message}`);
           log('Streaming failed', { name: error.name, error: message });
         });
+      els.cameraSelect.onchange = () => {
+        void handleCameraSelection();
+      };
+      els.refreshCameras.onclick = () => {
+        void refreshCameraDevices();
+      };
       els.hideVideo.onclick = toggleVideoHidden;
       els.muteAudio.onclick = toggleAudioMuted;
       els.frameInterval.onchange = updateFrameInterval;
       els.frameInterval.oninput = updateFrameInterval;
       els.searchForm.onsubmit = runManualSearch;
       els.searchInput.oninput = updateStreamingControls;
+      navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+        void refreshCameraDevices({ preferCurrent: state.streaming });
+      });
       window.addEventListener('beforeunload', stopPlayback);
+      renderCameraDevices();
+      void refreshCameraDevices();
       checkBackendHealth();
       setInterval(checkBackendHealth, BACKEND_HEALTH_INTERVAL_MS);
     </script>

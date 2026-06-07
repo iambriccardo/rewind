@@ -180,7 +180,8 @@ returns table (
   similarity double precision,
   event_similarity double precision,
   frame_similarity double precision,
-  text_rank double precision
+  text_rank double precision,
+  retrieval_score double precision
 )
 language plpgsql
 stable
@@ -413,7 +414,8 @@ begin
     case when fs.display_similarity < 0 then null else fs.display_similarity end as similarity,
     fs.event_similarity,
     fs.frame_similarity,
-    coalesce(fs.text_rank, 0)::double precision as text_rank
+    coalesce(fs.text_rank, 0)::double precision as text_rank,
+    fs.retrieval_score
   from final_scores fs
   order by
     fs.retrieval_score desc,

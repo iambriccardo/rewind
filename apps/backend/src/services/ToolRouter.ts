@@ -311,7 +311,8 @@ export class ToolRouter {
         similarity: result.similarity,
         event_similarity: result.event_similarity,
         frame_similarity: result.frame_similarity,
-        text_rank: result.text_rank
+        text_rank: result.text_rank,
+        retrieval_score: result.retrieval_score
       },
       frame_refs: (result.frames?.length ? result.frames : framesByEventId.get(result.id) ?? []).map(frameRef)
     }));
