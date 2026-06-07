@@ -16,6 +16,7 @@ import SwiftUI
 struct WearableMemorySearchResultView: View {
     let query: String?
     let isSearching: Bool
+    let statusText: String?
     let result: RewindSearchResultCard?
     let errorMessage: String?
     let autoDismissesResult: Bool
@@ -25,12 +26,14 @@ struct WearableMemorySearchResultView: View {
     init(
         query: String?,
         isSearching: Bool,
+        statusText: String? = nil,
         result: RewindSearchResultCard?,
         errorMessage: String?,
         autoDismissesResult: Bool = true
     ) {
         self.query = query
         self.isSearching = isSearching
+        self.statusText = statusText
         self.result = result
         self.errorMessage = errorMessage
         self.autoDismissesResult = autoDismissesResult
@@ -119,9 +122,16 @@ struct WearableMemorySearchResultView: View {
                 .fill(.black.opacity(0.34))
                 .overlay {
                     if isSearching {
-                        ProgressView()
-                            .controlSize(.regular)
-                            .tint(.white)
+                        VStack(spacing: 10) {
+                            SearchPulseGlyph()
+
+                            Text(statusText ?? query.map { "Searching for \($0)." } ?? "Searching your rewinds.")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                                .lineLimit(3)
+                                .padding(.horizontal, 12)
+                        }
                     } else if errorMessage != nil {
                         Image(systemName: "exclamationmark")
                             .font(.system(size: 28, weight: .bold))
@@ -138,6 +148,7 @@ struct WearableMemorySearchResultView: View {
     private var presentationID: String {
         [
             isSearching ? "searching" : "idle",
+            statusText ?? "no-status",
             result?.id ?? "no-result",
             errorMessage ?? "no-error"
         ].joined(separator: "-")
@@ -149,7 +160,7 @@ struct WearableMemorySearchResultView: View {
 
     private var accessibilitySummary: String {
         if isSearching {
-            return query.map { "Finding memory for \($0)" } ?? "Finding memory"
+            return statusText ?? query.map { "Finding memory for \($0)" } ?? "Finding memory"
         }
 
         if let result {
@@ -164,6 +175,27 @@ struct WearableMemorySearchResultView: View {
     }
 
     private static let cornerRadius: CGFloat = 28
+}
+
+private struct SearchPulseGlyph: View {
+    @State private var isPulsing = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(.white.opacity(isPulsing ? 0.08 : 0.30), lineWidth: 8)
+                .frame(width: isPulsing ? 58 : 42, height: isPulsing ? 58 : 42)
+
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 20, weight: .bold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: 64, height: 64)
+        .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: isPulsing)
+        .onAppear {
+            isPulsing = true
+        }
+    }
 }
 
 #Preview("Wearable Search Result") {
@@ -207,6 +239,7 @@ struct WearableMemorySearchResultView: View {
         WearableMemorySearchResultView(
             query: "blue adapter",
             isSearching: true,
+            statusText: "Searching your rewinds for the blue adapter.",
             result: nil,
             errorMessage: nil
         )

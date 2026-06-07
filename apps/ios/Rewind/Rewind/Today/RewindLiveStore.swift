@@ -24,6 +24,7 @@ final class RewindLiveStore {
     private(set) var lastCommittedFrameCount: Int?
     private(set) var searchResults: [RewindSearchResultCard] = []
     private(set) var searchQuery: String?
+    private(set) var searchStatusText: String?
     private(set) var searchError: String?
     private(set) var isSearchBusy = false
     private(set) var saveWaveID = UUID()
@@ -97,6 +98,7 @@ final class RewindLiveStore {
         sessionID = nil
         currentSaveRequest = nil
         isSearchBusy = false
+        searchStatusText = nil
 #if os(iOS)
         audioPlayer.stop()
 #endif
@@ -112,8 +114,10 @@ final class RewindLiveStore {
         startEventListenerIfNeeded()
         isSearchBusy = true
         searchQuery = trimmedQuery
+        let statusText = "Searching your rewinds for \(trimmedQuery)."
+        searchStatusText = statusText
         searchError = nil
-        status = .searching(trimmedQuery)
+        status = .searching(statusText)
         logger.info("Submitting Rewind search query")
         await endpoint.search(query: trimmedQuery)
     }
@@ -227,16 +231,18 @@ final class RewindLiveStore {
         }
 
         searchQuery = search.query
+        searchStatusText = search.text
         searchResults = []
         searchError = nil
         isSearchBusy = true
-        status = .searching(search.query)
+        status = .searching(search.text)
         logger.info("Live Rewind search started")
     }
 
     private func handleSearchResults(_ results: RewindSearchResults) async {
         searchResults = await makeResultCards(from: results)
         searchQuery = results.query
+        searchStatusText = nil
         searchError = nil
         isSearchBusy = false
         status = .searchComplete(results.results.count, results.query)
@@ -264,6 +270,7 @@ final class RewindLiveStore {
         }
         if wasSearching {
             searchError = message
+            searchStatusText = nil
         }
         status = scope == .connection ? .failed(message) : .operationFailed(message)
         logger.error("Live protocol failed: \(message, privacy: .public)")
@@ -389,8 +396,8 @@ enum LiveStatus: Equatable {
             "Capturing the frame window for \(title)."
         case let .saved(title, frameCount):
             "\(title) saved with \(frameCount) frames."
-        case let .searching(query):
-            "Looking for \(query)."
+        case let .searching(message):
+            message
         case let .searchComplete(count, query):
             "\(count) result\(count == 1 ? "" : "s") for \(query)."
         case let .failed(message):

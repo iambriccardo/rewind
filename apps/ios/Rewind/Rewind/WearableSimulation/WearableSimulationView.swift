@@ -149,6 +149,7 @@ struct WearableSimulationView: View {
                     WearableMemorySearchResultView(
                         query: searchQuery,
                         isSearching: searchIsBusy,
+                        statusText: searchStatusText,
                         result: searchResult,
                         errorMessage: searchError
                     )
@@ -181,6 +182,10 @@ struct WearableSimulationView: View {
 
     private var searchIsBusy: Bool {
         previewSearchResult == nil && liveStore.isSearchBusy
+    }
+
+    private var searchStatusText: String? {
+        previewSearchResult == nil ? liveStore.searchStatusText : nil
     }
 
     private var searchResult: RewindSearchResultCard? {

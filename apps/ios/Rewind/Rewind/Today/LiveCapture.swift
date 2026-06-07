@@ -34,6 +34,15 @@ struct LiveCapture: View {
                 .allowsHitTesting(false)
                 .zIndex(20)
 
+            if liveStore.isSearchBusy {
+                LiveSearchStatusBanner(text: liveStore.searchStatusText)
+                    .padding(.top, 18)
+                    .padding(.horizontal, 18)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .zIndex(30)
+            }
+
             VStack {
                 Spacer()
 
@@ -87,6 +96,7 @@ struct LiveCapture: View {
                 showRememberedBanner()
             }
         }
+        .animation(.smooth(duration: 0.24), value: liveStore.isSearchBusy)
     }
 
     @ViewBuilder
@@ -123,6 +133,44 @@ struct LiveCapture: View {
                     rememberedBanners.removeAll { $0.id == banner.id }
                 }
             }
+        }
+    }
+}
+
+private struct LiveSearchStatusBanner: View {
+    let text: String?
+    @State private var isPulsing = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                Circle()
+                    .stroke(.white.opacity(isPulsing ? 0.10 : 0.34), lineWidth: 7)
+                    .frame(width: isPulsing ? 42 : 30, height: isPulsing ? 42 : 30)
+
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 44, height: 44)
+            .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: isPulsing)
+
+            Text(text ?? "Searching your rewinds.")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 420)
+        .glassEffect(.regular.interactive(false), in: Capsule())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(text ?? "Searching your rewinds.")
+        .onAppear {
+            isPulsing = true
         }
     }
 }

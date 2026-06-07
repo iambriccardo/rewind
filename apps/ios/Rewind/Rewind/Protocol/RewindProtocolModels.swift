@@ -183,12 +183,24 @@ nonisolated struct RewindSearchStarted: Decodable, Sendable {
     }
 
     nonisolated struct Filters: Decodable, Sendable {
+        let timeRange: TimeRange?
         let entities: [String]?
         let locationHint: String?
 
         enum CodingKeys: String, CodingKey {
+            case timeRange = "time_range"
             case entities
             case locationHint = "location_hint"
+        }
+
+        nonisolated struct TimeRange: Decodable, Sendable {
+            let startedAfter: String?
+            let endedBefore: String?
+
+            enum CodingKeys: String, CodingKey {
+                case startedAfter = "started_after"
+                case endedBefore = "ended_before"
+            }
         }
     }
 }
@@ -199,12 +211,24 @@ nonisolated struct RewindSearchResults: Decodable, Sendable {
     let results: [RewindProtocolResult]
 
     nonisolated struct Filters: Decodable, Sendable {
+        let timeRange: TimeRange?
         let entities: [String]?
         let locationHint: String?
 
         enum CodingKeys: String, CodingKey {
+            case timeRange = "time_range"
             case entities
             case locationHint = "location_hint"
+        }
+
+        nonisolated struct TimeRange: Decodable, Sendable {
+            let startedAfter: String?
+            let endedBefore: String?
+
+            enum CodingKeys: String, CodingKey {
+                case startedAfter = "started_after"
+                case endedBefore = "ended_before"
+            }
         }
     }
 }
