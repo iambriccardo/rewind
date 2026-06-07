@@ -242,7 +242,11 @@ begin
         else e.status = any(p_statuses)
       end
       and (p_entities is null or array_length(p_entities, 1) is null or e.entities && p_entities)
-      and (q.location_text is null or e.location_hint ilike '%' || q.location_text || '%')
+      and (
+        q.location_text is null
+        or e.location_hint ilike '%' || q.location_text || '%'
+        or exists (select 1 from unnest(e.entities) entity where entity ilike '%' || q.location_text || '%')
+      )
       and (p_started_after is null or coalesce(e.ended_at, e.started_at, e.created_at) >= p_started_after)
       and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) < p_ended_before)
     order by e.embedding operator(extensions.<=>) p_query_embedding
@@ -267,7 +271,11 @@ begin
           else e.status = any(p_statuses)
         end
         and (p_entities is null or array_length(p_entities, 1) is null or e.entities && p_entities)
-        and (q.location_text is null or e.location_hint ilike '%' || q.location_text || '%')
+        and (
+          q.location_text is null
+          or e.location_hint ilike '%' || q.location_text || '%'
+          or exists (select 1 from unnest(e.entities) entity where entity ilike '%' || q.location_text || '%')
+        )
         and (p_started_after is null or coalesce(e.ended_at, e.started_at, e.created_at) >= p_started_after)
         and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) < p_ended_before)
       order by f.embedding operator(extensions.<=>) p_query_embedding
@@ -295,7 +303,11 @@ begin
         or (q.token_query is not null and e.search_tsv @@ q.token_query)
       )
       and (p_entities is null or array_length(p_entities, 1) is null or e.entities && p_entities)
-      and (q.location_text is null or e.location_hint ilike '%' || q.location_text || '%')
+      and (
+        q.location_text is null
+        or e.location_hint ilike '%' || q.location_text || '%'
+        or exists (select 1 from unnest(e.entities) entity where entity ilike '%' || q.location_text || '%')
+      )
       and (p_started_after is null or coalesce(e.ended_at, e.started_at, e.created_at) >= p_started_after)
       and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) < p_ended_before)
     order by text_rank desc
@@ -314,7 +326,11 @@ begin
         else e.status = any(p_statuses)
       end
       and (p_entities is null or array_length(p_entities, 1) is null or e.entities && p_entities)
-      and (q.location_text is null or e.location_hint ilike '%' || q.location_text || '%')
+      and (
+        q.location_text is null
+        or e.location_hint ilike '%' || q.location_text || '%'
+        or exists (select 1 from unnest(e.entities) entity where entity ilike '%' || q.location_text || '%')
+      )
       and (p_started_after is null or coalesce(e.ended_at, e.started_at, e.created_at) >= p_started_after)
       and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) < p_ended_before)
     order by e.created_at desc
@@ -389,7 +405,15 @@ begin
         end
         + (1 / (1 + greatest(0, extract(epoch from (now() - e.created_at)) / 3600) / v_recency_half_life_hours)) * 0.06
         + case when p_entities is not null and array_length(p_entities, 1) is not null and e.entities && p_entities then 0.03 else 0 end
-        + case when q.location_text is not null and e.location_hint ilike '%' || q.location_text || '%' then 0.02 else 0 end
+        + case
+          when q.location_text is not null
+            and (
+              e.location_hint ilike '%' || q.location_text || '%'
+              or exists (select 1 from unnest(e.entities) entity where entity ilike '%' || q.location_text || '%')
+            )
+            then 0.02
+          else 0
+        end
       )::double precision as retrieval_score
     from gated_scores s
     join public.rewind_events e on e.id = s.id

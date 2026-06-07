@@ -79,7 +79,7 @@ export class GeminiLiveAgent {
             location_hint: {
               type: 'string',
               description:
-                'Short physical/spatial hint inferred from the scene, such as office desk, kitchen counter, sofa, backpack, shelf, patio, parking lot, table, or room. Include it when a reliable place, surface, container, or area is visible or mentioned.'
+                'Short physical/spatial hint inferred from the scene. Use the most specific reliable place, surface, container, area, or spatial context visible or mentioned by the user. Do not choose from a fixed list; name the actual observed context.'
             },
             rewind_duration_seconds: {
               type: 'number',
@@ -434,10 +434,10 @@ function systemInstruction(clientSession: NormalizedClientSession): string {
     '- Infer the memory from ALL RECENT CONTEXT: the user words, audio history, visible camera frames, visible text, object positions, places, surfaces, and actions.',
     '- If the user says "this", "that", "it", "here", or "where I put this", resolve the referent from the camera/video context.',
     '- entities is REQUIRED. It must be a simple array of lowercase strings. Include concrete searchable labels: objects, people, places, surfaces, containers, visible text/brands, colors, identifiers, spatial relationships, and actions. Use short noun phrases. Do not include quotes inside the strings, JSON-like structures, bullets, full sentences, or generic words like thing, stuff, object, moment, memory.',
-    '- Avoid weak standalone entities such as man, person, people, activity, discussion, talking, pointing, outdoors, office, or room when a more specific label is available. Prefer distinctive phrases such as "man in white cap", "beige pen", "green wristband", "orange deck chair", "license plate w 31944 d", "office desk", or "phone on white sofa".',
+    '- Avoid weak standalone entities such as generic people, places, activities, gestures, or rooms when a more specific label is available. Prefer distinctive phrases with observed attributes, visible text, roles, object identity, spatial relationships, or other concrete context.',
     '- description must be a compact retrieval summary: what happened, what object/action matters, where it is, and the spatial relationship that would help future search. If the user gave an explicit duration, do not let the duration replace the actual memory content.',
     '- title should be short, human-readable, and content-specific. Do not title memories as "Last N seconds", "Last N seconds memory", "Last N seconds activity", "Remember this", or "Remind me about this" when the visible/audible content can be named.',
-    '- location_hint should be included whenever a reliable place, surface, container, or area is visible or mentioned. Use concise hints such as office desk, white sofa, outdoor patio, parking lot, wall, kitchen counter, shelf, drawer, backpack, or table. Omit it only when no reliable physical hint is available.',
+    '- location_hint should be included whenever a reliable place, surface, container, or area is visible or mentioned. Use a concise natural phrase for the actual observed context. Omit it only when no reliable physical hint is available.',
     '- Keep create_rewind arguments compact. Do not include raw transcripts, protocol details, base64, frame IDs, timestamps, dates, or unnecessary metadata.',
     '',
     '# Search Rewinds',

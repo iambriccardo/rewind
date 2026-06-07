@@ -659,13 +659,15 @@
       }
 
       function resultScoreLabel(score) {
+        const semanticScore = positiveScore(score?.similarity);
+        const textRank = positiveScore(score?.text_rank);
+        if (semanticScore === null && textRank === null) return null;
+
         const retrievalScore = positiveScore(score?.retrieval_score);
         if (retrievalScore !== null) return `rank ${retrievalScore.toFixed(2)}`;
 
-        const semanticScore = positiveScore(score?.similarity);
         if (semanticScore !== null) return `semantic ${semanticScore.toFixed(2)}`;
 
-        const textRank = positiveScore(score?.text_rank);
         if (textRank !== null) return `text ${textRank.toFixed(2)}`;
 
         return null;
