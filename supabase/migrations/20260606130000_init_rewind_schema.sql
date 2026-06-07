@@ -187,10 +187,12 @@ stable
 as $$
 declare
   v_limit integer := greatest(1, least(coalesce(p_limit, 10), 50));
-  v_candidate_limit integer := greatest(100, least(greatest(1, coalesce(p_limit, 10)) * 40, 1000));
+  v_candidate_limit integer := greatest(120, least(greatest(1, coalesce(p_limit, 10)) * 50, 1200));
   v_vector_similarity_floor double precision := 0.64;
-  v_time_filtered_vector_similarity_floor double precision := 0.56;
+  v_filtered_vector_similarity_floor double precision := 0.56;
   v_text_rank_floor double precision := 0.000001;
+  v_text_rank_scale double precision := 3.5;
+  v_recency_half_life_hours double precision := 48.0;
 begin
   perform set_config('hnsw.ef_search', '100', true);
   perform set_config('hnsw.iterative_scan', 'strict_order', true);
@@ -266,40 +268,40 @@ begin
     ) ranked
     group by ranked.rewind_event_id
   ),
-	  text_candidates as (
-	    select
-	      e.id,
-	      greatest(
-	        coalesce(case when q.ts_query is not null and e.search_tsv @@ q.ts_query then ts_rank_cd(e.search_tsv, q.ts_query) end, 0),
-	        coalesce(case when q.token_query is not null and e.search_tsv @@ q.token_query then ts_rank_cd(e.search_tsv, q.token_query) end, 0)
-	      )::double precision as text_rank
-	    from public.rewind_events e
-	    cross join query_terms q
-	    where (q.ts_query is not null or q.token_query is not null)
-	      and e.user_id = p_user_id
-	      and case
-	        when p_statuses is null or array_length(p_statuses, 1) is null then e.status in ('committed', 'pending')
-	        else e.status = any(p_statuses)
-	      end
-	      and (
-	        (q.ts_query is not null and e.search_tsv @@ q.ts_query)
-	        or (q.token_query is not null and e.search_tsv @@ q.token_query)
-	      )
-	      and (p_entities is null or array_length(p_entities, 1) is null or e.entities && p_entities)
-	      and (q.location_text is null or e.location_hint ilike '%' || q.location_text || '%')
-	      and (p_started_after is null or coalesce(e.ended_at, e.started_at, e.created_at) >= p_started_after)
-	      and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) <= p_ended_before)
-	    order by text_rank desc
-	    limit v_candidate_limit
-	  ),
+  text_candidates as (
+    select
+      e.id,
+      greatest(
+        coalesce(case when q.ts_query is not null and e.search_tsv @@ q.ts_query then ts_rank_cd(e.search_tsv, q.ts_query) end, 0),
+        coalesce(case when q.token_query is not null and e.search_tsv @@ q.token_query then ts_rank_cd(e.search_tsv, q.token_query) end, 0)
+      )::double precision as text_rank
+    from public.rewind_events e
+    cross join query_terms q
+    where (q.ts_query is not null or q.token_query is not null)
+      and e.user_id = p_user_id
+      and case
+        when p_statuses is null or array_length(p_statuses, 1) is null then e.status in ('committed', 'pending')
+        else e.status = any(p_statuses)
+      end
+      and (
+        (q.ts_query is not null and e.search_tsv @@ q.ts_query)
+        or (q.token_query is not null and e.search_tsv @@ q.token_query)
+      )
+      and (p_entities is null or array_length(p_entities, 1) is null or e.entities && p_entities)
+      and (q.location_text is null or e.location_hint ilike '%' || q.location_text || '%')
+      and (p_started_after is null or coalesce(e.ended_at, e.started_at, e.created_at) >= p_started_after)
+      and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) <= p_ended_before)
+    order by text_rank desc
+    limit v_candidate_limit
+  ),
   recent_candidates as (
     select e.id
     from public.rewind_events e
     cross join query_terms q
-	    where p_query_embedding is null
-	      and q.ts_query is null
-	      and q.token_query is null
-	      and e.user_id = p_user_id
+    where p_query_embedding is null
+      and q.ts_query is null
+      and q.token_query is null
+      and e.user_id = p_user_id
       and case
         when p_statuses is null or array_length(p_statuses, 1) is null then e.status in ('committed', 'pending')
         else e.status = any(p_statuses)
@@ -320,80 +322,96 @@ begin
     union
     select rc.id from recent_candidates rc
   ),
-	  scores as (
-	    select
-	      c.id,
-	      ev.event_similarity,
-	      fv.frame_similarity,
-	      tc.text_rank,
-	      greatest(coalesce(ev.event_similarity, -1), coalesce(fv.frame_similarity, -1))::double precision as display_similarity,
-	      case
-	        when ev.event_similarity is not null and fv.frame_similarity is not null then
-	          (greatest(ev.event_similarity, 0) * 0.82 + greatest(fv.frame_similarity, 0) * 0.18)
-	        when ev.event_similarity is not null then greatest(ev.event_similarity, 0)
-	        when fv.frame_similarity is not null then greatest(fv.frame_similarity, 0) * 0.78
-	        else 0
-	      end::double precision as semantic_score
-	    from candidate_ids c
-	    left join event_vector_candidates ev on ev.id = c.id
-	    left join frame_vector_candidates fv on fv.id = c.id
-	    left join text_candidates tc on tc.id = c.id
-	  ),
-	  ranked_scores as (
-	    select
-	      s.*,
-	      (
-	        s.semantic_score * 0.76 +
-	        least(coalesce(s.text_rank, 0) / 2.4, 1) * 0.24
-	      )::double precision as relevance_score,
-	      floor(
-	        (
-	          s.semantic_score * 0.76 +
-	          least(coalesce(s.text_rank, 0) / 2.4, 1) * 0.24
-	        ) * 40
-	      )::integer as relevance_bucket
-	    from scores s
-	  ),
-	  gated_scores as (
-	    select s.*
-	    from ranked_scores s
-	    cross join query_terms q
-	    where
-	      coalesce(s.text_rank, 0) >= v_text_rank_floor
-	      or (p_entities is not null and array_length(p_entities, 1) is not null)
-	      or q.location_text is not null
-	      or coalesce(s.display_similarity, -1) >= case
-	        when p_started_after is not null or p_ended_before is not null
-	          then v_time_filtered_vector_similarity_floor
-	        else v_vector_similarity_floor
-	      end
-	  )
-	  select
-	    e.id,
-    e.user_id,
-    e.device_id,
-    e.status,
-    e.title,
-    e.description,
-    e.entities,
-    e.location_hint,
-    e.latitude,
-    e.longitude,
-    e.started_at,
-    e.ended_at,
-    e.metadata,
-    e.created_at,
-    e.updated_at,
-    case when s.display_similarity < 0 then null else s.display_similarity end as similarity,
-    s.event_similarity,
-	    s.frame_similarity,
-	    coalesce(s.text_rank, 0)::double precision as text_rank
-	  from gated_scores s
-	  join public.rewind_events e on e.id = s.id
-	  order by
-	    s.relevance_bucket desc,
-	    e.created_at desc,
-	    s.relevance_score desc
-	  limit v_limit;
+  scores as (
+    select
+      c.id,
+      ev.event_similarity,
+      fv.frame_similarity,
+      tc.text_rank,
+      greatest(coalesce(ev.event_similarity, -1), coalesce(fv.frame_similarity, -1))::double precision as display_similarity,
+      case
+        when ev.event_similarity is not null and fv.frame_similarity is not null then
+          (greatest(ev.event_similarity, fv.frame_similarity) * 0.72 + least(ev.event_similarity, fv.frame_similarity) * 0.28)
+        when ev.event_similarity is not null then greatest(ev.event_similarity, 0)
+        when fv.frame_similarity is not null then greatest(fv.frame_similarity, 0) * 0.9
+        else 0
+      end::double precision as semantic_score,
+      case
+        when coalesce(tc.text_rank, 0) > 0 then (1 - exp(-least(tc.text_rank, 20) / v_text_rank_scale))
+        else 0
+      end::double precision as text_score
+    from candidate_ids c
+    left join event_vector_candidates ev on ev.id = c.id
+    left join frame_vector_candidates fv on fv.id = c.id
+    left join text_candidates tc on tc.id = c.id
+  ),
+  gated_scores as (
+    select s.*
+    from scores s
+    cross join query_terms q
+    where
+      coalesce(s.text_rank, 0) >= v_text_rank_floor
+      or (
+        coalesce(s.display_similarity, -1) >= case
+          when p_started_after is not null
+            or p_ended_before is not null
+            or (p_entities is not null and array_length(p_entities, 1) is not null)
+            or q.location_text is not null
+            then v_filtered_vector_similarity_floor
+          else v_vector_similarity_floor
+        end
+      )
+      or (p_query_embedding is null and q.ts_query is null and q.token_query is null)
+  ),
+  final_scores as (
+    select
+      e.*,
+      s.display_similarity,
+      s.event_similarity,
+      s.frame_similarity,
+      s.text_rank,
+      (
+        case
+          when p_query_embedding is not null and (q.ts_query is not null or q.token_query is not null) then
+            s.semantic_score * 0.72 + s.text_score * 0.22
+          when p_query_embedding is not null then
+            s.semantic_score * 0.92
+          when q.ts_query is not null or q.token_query is not null then
+            s.text_score * 0.82
+          else 0
+        end
+        + (1 / (1 + greatest(0, extract(epoch from (now() - e.created_at)) / 3600) / v_recency_half_life_hours)) * 0.06
+        + case when p_entities is not null and array_length(p_entities, 1) is not null and e.entities && p_entities then 0.03 else 0 end
+        + case when q.location_text is not null and e.location_hint ilike '%' || q.location_text || '%' then 0.02 else 0 end
+      )::double precision as retrieval_score
+    from gated_scores s
+    join public.rewind_events e on e.id = s.id
+    cross join query_terms q
+  )
+  select
+    fs.id,
+    fs.user_id,
+    fs.device_id,
+    fs.status,
+    fs.title,
+    fs.description,
+    fs.entities,
+    fs.location_hint,
+    fs.latitude,
+    fs.longitude,
+    fs.started_at,
+    fs.ended_at,
+    fs.metadata,
+    fs.created_at,
+    fs.updated_at,
+    case when fs.display_similarity < 0 then null else fs.display_similarity end as similarity,
+    fs.event_similarity,
+    fs.frame_similarity,
+    coalesce(fs.text_rank, 0)::double precision as text_rank
+  from final_scores fs
+  order by
+    fs.retrieval_score desc,
+    fs.created_at desc
+  limit v_limit;
 end;
 $$;

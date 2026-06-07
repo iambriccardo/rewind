@@ -147,6 +147,7 @@ export type RewindSaveRequest = {
   rewind_duration_seconds: number;
   capture_anchor_utc: string;
   capture_duration_ms: number;
+  capture_frame_interval_ms?: number;
   capture_window_started_at: string;
   capture_window_ended_at: string;
   include_frame_images: boolean;

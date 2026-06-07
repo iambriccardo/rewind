@@ -65,6 +65,8 @@ export interface RewindRepository {
     context?: RewindSearchContext;
     limit?: number;
   }): Promise<RewindSearchResult[]>;
+  getRewindEvent(input: { user_id: string; event_id: string }): Promise<RewindEvent | null>;
+  getRewindFrames(input: { user_id: string; event_ids: string[] }): Promise<RewindFrame[]>;
   getRewindDetails(input: { user_id: string; event_id: string }): Promise<{ event: RewindEvent; frames: RewindFrame[] } | null>;
   listRewinds(userId: string, limit?: number): Promise<RewindSearchResult[]>;
 }
@@ -138,18 +140,24 @@ export class SupabaseRewindRepository implements RewindRepository {
   }
 
   async commitRewind(input: CommitRewindInput): Promise<{ event: RewindEvent; frames: RewindFrame[] }> {
+    const eventUpdate: Record<string, unknown> = {
+      status: 'committed',
+      started_at: input.started_at ?? null,
+      ended_at: input.ended_at ?? null,
+      latitude: input.location?.latitude ?? null,
+      longitude: input.location?.longitude ?? null,
+      metadata: input.metadata ?? {}
+    };
+    if (Object.prototype.hasOwnProperty.call(input.location ?? {}, 'location_hint')) {
+      eventUpdate.location_hint = input.location?.location_hint ?? null;
+    }
+    if (input.embedding) {
+      eventUpdate.embedding = vectorLiteral(input.embedding);
+    }
+
     const { data: event, error: updateError } = await this.client
       .from('rewind_events')
-      .update({
-        status: 'committed',
-        started_at: input.started_at ?? null,
-        ended_at: input.ended_at ?? null,
-        latitude: input.location?.latitude ?? null,
-        longitude: input.location?.longitude ?? null,
-        location_hint: input.location?.location_hint ?? null,
-        embedding: vectorLiteral(input.embedding),
-        metadata: input.metadata ?? {}
-      })
+      .update(eventUpdate)
       .eq('id', input.event_id)
       .eq('user_id', input.user_id)
       .eq('device_id', input.device_id)
@@ -170,12 +178,18 @@ export class SupabaseRewindRepository implements RewindRepository {
     }));
 
     if (frameRows.length) {
-      const { error } = await this.client.from('rewind_frames').upsert(frameRows, { onConflict: 'rewind_event_id,device_frame_uuid' });
+      const { data: frames, error } = await this.client
+        .from('rewind_frames')
+        .upsert(frameRows, { onConflict: 'rewind_event_id,device_frame_uuid' })
+        .select('*');
       if (error) throw error;
+      return {
+        event,
+        frames: (frames ?? []).sort((left, right) => left.order_index - right.order_index)
+      };
     }
 
-    const details = await this.getRewindDetails({ user_id: input.user_id, event_id: input.event_id });
-    return details ?? { event, frames: [] };
+    return { event, frames: [] };
   }
 
   async searchRewinds(input: {
@@ -200,7 +214,7 @@ export class SupabaseRewindRepository implements RewindRepository {
     return (data ?? []) as RewindSearchResult[];
   }
 
-  async getRewindDetails(input: { user_id: string; event_id: string }): Promise<{ event: RewindEvent; frames: RewindFrame[] } | null> {
+  async getRewindEvent(input: { user_id: string; event_id: string }): Promise<RewindEvent | null> {
     const { data: event, error } = await this.client
       .from('rewind_events')
       .select('*')
@@ -208,6 +222,25 @@ export class SupabaseRewindRepository implements RewindRepository {
       .eq('user_id', input.user_id)
       .single();
     if (error) return null;
+    return event;
+  }
+
+  async getRewindFrames(input: { user_id: string; event_ids: string[] }): Promise<RewindFrame[]> {
+    if (!input.event_ids.length) return [];
+    const { data, error } = await this.client
+      .from('rewind_frames')
+      .select('*')
+      .eq('user_id', input.user_id)
+      .in('rewind_event_id', input.event_ids)
+      .order('rewind_event_id', { ascending: true })
+      .order('order_index', { ascending: true });
+    if (error) throw error;
+    return data ?? [];
+  }
+
+  async getRewindDetails(input: { user_id: string; event_id: string }): Promise<{ event: RewindEvent; frames: RewindFrame[] } | null> {
+    const event = await this.getRewindEvent(input);
+    if (!event) return null;
 
     const { data: frames, error: frameError } = await this.client
       .from('rewind_frames')

@@ -524,6 +524,13 @@
         };
       }
 
+      function rewindFrameCache() {
+        const cache = window.RewindFrameCache;
+        if (cache?.compileFrameRefs && cache?.compileResultFrames) return cache;
+        window.RewindFrameCache = createRewindFrameCache();
+        return window.RewindFrameCache;
+      }
+
       const els = {
         video: document.getElementById('video'),
         placeholder: document.getElementById('placeholder'),
@@ -634,7 +641,7 @@
       }
 
       function compileResultFrames(result) {
-        return window.RewindFrameCache.compileResultFrames(result, {
+        return rewindFrameCache().compileResultFrames(result, {
           assetResolver: (frameUuid) => state.assets.get(frameUuid),
           onError: (error) => log('Frame window lookup failed', { error: error.message || String(error) })
         });
@@ -848,7 +855,7 @@
           buffers: {
             rewind: {
               duration_ms: FRAME_BUFFER_DURATION_MS,
-              frame_interval_ms: LOCAL_FRAME_CAPTURE_INTERVAL_MS,
+              frame_interval_ms: rewindCaptureGranularityMs(),
               max_frames: FRAME_BUFFER_MAX_FRAMES
             }
           },
@@ -1340,12 +1347,12 @@
         try {
           if (!state.buffer.length && state.streaming && !state.videoHidden) captureFrame();
           if (!state.buffer.length) throw new Error('No local frame buffer is available for this rewind.');
-          await refreshGeolocation({ timeoutMs: 1500, maximumAgeMs: 60_000 });
+          const locationPromise = refreshGeolocation({ timeoutMs: 1500, maximumAgeMs: 60_000 });
           const window = captureWindow(request);
-          const durationMs = Math.min(FRAME_BUFFER_DURATION_MS, window.durationMs);
+          const durationMs = window.durationMs;
           const frames = selectBufferedFrames(window);
           if (!frames.length) throw new Error('No buffered frames matched the requested rewind window.');
-          await persistFrames(frames);
+          await Promise.all([persistFrames(frames), locationPromise]);
           renderSavedMemory(request, frames.length, 'uploading');
           const upload = {
             event_id: request.event_id,
@@ -1374,6 +1381,7 @@
               rewind_duration_ms: durationMs,
               capture_anchor_utc: window.anchorUtc,
               capture_duration_ms: durationMs,
+              capture_frame_interval_ms: rewindCaptureGranularityMs(),
               capture_window_started_at: new Date(window.startedAtMs).toISOString(),
               capture_window_ended_at: new Date(window.endedAtMs).toISOString(),
               frame_embedding_mode: request.frame_embedding_mode || 'text_only',
@@ -1392,7 +1400,7 @@
             },
             body: JSON.stringify(upload)
           });
-          if (!response.ok) throw new Error(`Upload returned ${response.status}`);
+          if (!response.ok) throw new Error(await uploadErrorMessage(response));
           const result = await response.json();
           protocolLog('rewind.upload_complete', {
             event_id: result.event?.id || request.event_id,
@@ -1423,10 +1431,37 @@
       }
 
       function captureDurationMs(request) {
-        const explicitMs = Number(request.capture_duration_ms);
-        if (Number.isFinite(explicitMs) && explicitMs > 0) return Math.min(FRAME_BUFFER_DURATION_MS, explicitMs);
-        const seconds = Number(request.rewind_duration_seconds || DEFAULT_REWIND_CAPTURE_DURATION_SECONDS);
-        return Math.min(FRAME_BUFFER_DURATION_MS, Math.max(1, seconds) * 1000);
+        if (request.capture_duration_ms !== undefined) {
+          const explicitMs = Number(request.capture_duration_ms);
+          if (!Number.isFinite(explicitMs) || explicitMs <= 0) throw new Error('Rewind duration must be greater than zero.');
+          return clampCaptureDurationMs(explicitMs, request.capture_frame_interval_ms);
+        }
+
+        const seconds = Number(request.rewind_duration_seconds ?? DEFAULT_REWIND_CAPTURE_DURATION_SECONDS);
+        if (!Number.isFinite(seconds) || seconds <= 0) throw new Error('Rewind duration must be greater than zero.');
+        return clampCaptureDurationMs(seconds * 1000, request.capture_frame_interval_ms);
+      }
+
+      function clampCaptureDurationMs(durationMs, requestedGranularityMs) {
+        const granularityMs = rewindCaptureGranularityMs(requestedGranularityMs);
+        const clampedMs = Math.min(FRAME_BUFFER_DURATION_MS, Math.round(durationMs));
+        return Math.max(granularityMs, Math.min(FRAME_BUFFER_DURATION_MS, Math.ceil(clampedMs / granularityMs) * granularityMs));
+      }
+
+      function rewindCaptureGranularityMs(requestedGranularityMs) {
+        const granularityMs = Number(requestedGranularityMs);
+        const effectiveMs = Number.isFinite(granularityMs) && granularityMs > 0 ? granularityMs : LOCAL_FRAME_CAPTURE_INTERVAL_MS;
+        return Math.max(1, Math.min(FRAME_BUFFER_DURATION_MS, Math.round(effectiveMs)));
+      }
+
+      async function uploadErrorMessage(response) {
+        const fallback = `Upload returned ${response.status}`;
+        try {
+          const payload = await response.json();
+          return payload?.error ? `${fallback}: ${payload.error}` : fallback;
+        } catch {
+          return fallback;
+        }
       }
 
       function captureWindow(request) {
@@ -1465,7 +1500,7 @@
         els.player.innerHTML = '';
         els.playbackInfo.innerHTML = '';
         els.frameList.innerHTML = '';
-        const orderedRefs = window.RewindFrameCache.compileFrameRefs(frameRefs, {
+        const orderedRefs = rewindFrameCache().compileFrameRefs(frameRefs, {
           assetResolver: (frameUuid) => state.assets.get(frameUuid)
         });
         if (!orderedRefs.length) {

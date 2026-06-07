@@ -102,28 +102,36 @@ app.post<{ Params: { id: string }; Body: RewindCommitRequest }>('/v1/rewinds/:id
   const deviceId = getDeviceId(request.headers, request.query);
   const validationError = validateCommitRequest(request.body, request.params.id);
   if (validationError) return reply.code(400).send({ error: validationError });
-  const existing = await repository.getRewindDetails({ user_id: userId, event_id: request.params.id });
-  if (!existing || existing.event.device_id !== deviceId) return reply.code(404).send({ error: 'Not found' });
-  const body = await prepareCommitPayload(normalizeCommitTimes(request.body));
-  const eventEmbedding = await buildCommittedEventEmbedding(existing.event, body);
-  const result = await repository.commitRewind({
-    ...body,
-    event_id: request.params.id,
-    user_id: userId,
-    device_id: deviceId,
-    location: {
-      ...body.location,
-      location_hint: body.location?.location_hint ?? existing.event.location_hint ?? undefined
-    },
-    embedding: eventEmbedding,
-    metadata: {
-      ...existing.event.metadata,
-      ...(body.metadata ?? {}),
-      event_embedding_refreshed_at: utcIso(new Date()),
-      event_embedding_sources: ['live_summary', 'entities', 'location_hint']
-    }
-  });
-  return reply.code(201).send(publicDetails(result));
+  try {
+    const existing = await repository.getRewindEvent({ user_id: userId, event_id: request.params.id });
+    if (!existing || existing.device_id !== deviceId) return reply.code(404).send({ error: 'Not found' });
+    const body = await prepareCommitPayload(normalizeCommitTimes(request.body));
+    const eventEmbedding = await buildCommittedEventEmbedding(existing, body);
+    const location = commitLocationUpdate(body.location, existing.location_hint);
+    const result = await repository.commitRewind({
+      ...body,
+      event_id: request.params.id,
+      user_id: userId,
+      device_id: deviceId,
+      location,
+      embedding: eventEmbedding,
+      metadata: {
+        ...existing.metadata,
+        ...(body.metadata ?? {}),
+        ...(eventEmbedding
+          ? {
+              event_embedding_refreshed_at: utcIso(new Date()),
+              event_embedding_sources: ['live_summary', 'entities', 'location_hint']
+            }
+          : {})
+      }
+    });
+    return reply.code(201).send(publicDetails(result));
+  } catch (error) {
+    app.log.error({ error, event_id: request.params.id }, 'rewind commit failed');
+    const response = commitErrorResponse(error);
+    return reply.code(response.status).send({ error: response.message });
+  }
 });
 
 app.get('/v1/live', { websocket: true }, async (socket, request) => {
@@ -172,7 +180,9 @@ app.get('/v1/live', { websocket: true }, async (socket, request) => {
         device_id: deviceId,
         agent: liveContext.agent,
         last_user_text: lastUserText,
-        max_rewind_duration_seconds: liveContext.client_session.maxRewindDurationSeconds
+        max_rewind_duration_seconds: liveContext.client_session.maxRewindDurationSeconds,
+        rewind_buffer_duration_ms: liveContext.client_session.bufferDurationMs,
+        rewind_frame_interval_ms: liveContext.client_session.frameIntervalMs
       });
     } catch (error) {
       app.log.error({ error }, 'websocket message failed');
@@ -214,6 +224,8 @@ app.get('/v1/live', { websocket: true }, async (socket, request) => {
         user_agent: input.user_agent,
         client_session: clientSession.hello,
         max_rewind_duration_seconds: clientSession.maxRewindDurationSeconds,
+        rewind_buffer_duration_ms: clientSession.bufferDurationMs,
+        rewind_frame_interval_ms: clientSession.frameIntervalMs,
         client_clock_offset_ms: clientSession.clientClockOffsetMs
       }
     });
@@ -257,6 +269,8 @@ app.get('/v1/live', { websocket: true }, async (socket, request) => {
             device_id: input.device_id,
             last_user_text: input.get_last_user_text(),
             max_rewind_duration_seconds: clientSession.maxRewindDurationSeconds,
+            rewind_buffer_duration_ms: clientSession.bufferDurationMs,
+            rewind_frame_interval_ms: clientSession.frameIntervalMs,
             client_context: clientSession.hello.context,
             client_clock_offset_ms: clientSession.clientClockOffsetMs
           },
@@ -325,6 +339,7 @@ function normalizeSessionHello(message: SessionHello, deviceId: string): Normali
   return {
     hello: normalized,
     bufferDurationMs,
+    frameIntervalMs,
     maxRewindDurationSeconds: Math.max(1, Math.ceil(bufferDurationMs / 1000)),
     clientClockOffsetMs
   };
@@ -377,6 +392,8 @@ async function handleClientMessage(
     agent: GeminiLiveAgent;
     last_user_text: string;
     max_rewind_duration_seconds: number;
+    rewind_buffer_duration_ms: number;
+    rewind_frame_interval_ms?: number;
   }
 ): Promise<void> {
   await logger.event({
@@ -434,16 +451,44 @@ function validateCommitRequest(message: RewindCommitRequest, eventId: string): s
   if (message.started_at && message.ended_at && Date.parse(message.ended_at) < Date.parse(message.started_at)) {
     return 'Commit ended_at must be greater than or equal to started_at.';
   }
+  const durationMs = numericMetadataValue(message.metadata, 'capture_duration_ms') ?? numericMetadataValue(message.metadata, 'rewind_duration_ms');
+  if (durationMs !== undefined && (!Number.isFinite(durationMs) || durationMs <= 0)) return 'Commit capture duration must be greater than zero.';
+  const frameIntervalMs = numericMetadataValue(message.metadata, 'capture_frame_interval_ms');
+  if (frameIntervalMs !== undefined && (!Number.isFinite(frameIntervalMs) || frameIntervalMs <= 0)) return 'Commit capture frame interval must be greater than zero.';
+  if (durationMs !== undefined && frameIntervalMs !== undefined && durationMs < frameIntervalMs) {
+    return 'Commit capture duration must be at least one frame interval.';
+  }
   if (!Array.isArray(message.frames) || !message.frames.length) return 'Commit payload requires at least one frame.';
   if (message.frames.length > 120) return 'Commit payload contains too many frames.';
   for (const [index, frame] of message.frames.entries()) {
     if (!frame || typeof frame !== 'object') return `Frame ${index} must be an object.`;
     if (!frame.device_frame_uuid || typeof frame.device_frame_uuid !== 'string') return `Frame ${index} requires device_frame_uuid.`;
+    if (!isUuid(frame.device_frame_uuid)) return `Frame ${index} device_frame_uuid must be a valid UUID.`;
     if (frame.captured_at && !isValidInstant(frame.captured_at)) return `Frame ${index} captured_at must be a valid datetime.`;
+    if (frame.offset_ms !== undefined && (!Number.isInteger(frame.offset_ms) || frame.offset_ms < 0)) return `Frame ${index} offset_ms must be a non-negative integer.`;
     if (frame.image_base64 && typeof frame.image_base64 !== 'string') return `Frame ${index} image_base64 must be a string.`;
     if (frame.mime_type && typeof frame.mime_type !== 'string') return `Frame ${index} mime_type must be a string.`;
   }
   return undefined;
+}
+
+function numericMetadataValue(metadata: JsonObject | undefined, key: string): number | undefined {
+  const value = metadata?.[key];
+  return typeof value === 'number' ? value : undefined;
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function commitErrorResponse(error: unknown): { status: number; message: string } {
+  const err = error as { code?: string; message?: string } | undefined;
+  const message = err?.message ?? (error instanceof Error ? error.message : String(error));
+  if (err?.code === '22P02') return { status: 400, message: 'Commit payload contains an invalid UUID.' };
+  if (err?.code === '23503') return { status: 400, message: 'Commit payload references an unknown rewind event.' };
+  if (err?.code === 'PGRST116') return { status: 404, message: 'Not found' };
+  if (/embedding|gemini|model/i.test(message)) return { status: 502, message: 'Frame embedding generation failed.' };
+  return { status: 500, message: 'Rewind commit failed.' };
 }
 
 function normalizeCommitTimes(message: RewindCommitRequest): RewindCommitRequest {
@@ -509,14 +554,47 @@ async function prepareCommitPayload(message: RewindCommitRequest): Promise<Rewin
   };
 }
 
-async function buildCommittedEventEmbedding(event: RewindEvent, commit: RewindCommitRequest): Promise<number[]> {
+async function buildCommittedEventEmbedding(event: RewindEvent, commit: RewindCommitRequest): Promise<number[] | undefined> {
+  const eventLocationHint = normalizeOptionalLocationHint(event.location_hint);
+  const hasCommitLocationHint = hasOwnProperty(commit.location, 'location_hint');
+  const commitLocationHint = normalizeOptionalLocationHint(commit.location?.location_hint);
+  const effectiveLocationHint = hasCommitLocationHint ? commitLocationHint : eventLocationHint;
+  if (event.embedding && effectiveLocationHint === eventLocationHint) {
+    return undefined;
+  }
+
   const embeddingText = embeddings.buildEventEmbeddingText({
     title: event.title,
     description: event.description,
     entities: event.entities,
-    location_hint: commit.location?.location_hint ?? event.location_hint
+    location_hint: effectiveLocationHint
   });
   return embeddings.embedDocument(embeddingText);
+}
+
+function commitLocationUpdate(location: RewindCommitRequest['location'], existingLocationHint: string | null | undefined): RewindCommitRequest['location'] {
+  if (!location) return undefined;
+  const nextLocation = { ...location };
+  if (!hasOwnProperty(location, 'location_hint')) return nextLocation;
+
+  const nextLocationHint = normalizeOptionalLocationHint(location.location_hint);
+  const currentLocationHint = normalizeOptionalLocationHint(existingLocationHint);
+  if (nextLocationHint === currentLocationHint) {
+    delete nextLocation.location_hint;
+  } else {
+    nextLocation.location_hint = nextLocationHint;
+  }
+  return nextLocation;
+}
+
+function hasOwnProperty(object: unknown, property: string): boolean {
+  return Boolean(object && typeof object === 'object' && Object.prototype.hasOwnProperty.call(object, property));
+}
+
+function normalizeOptionalLocationHint(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
 }
 
 function stripFrameImages(message: RewindCommitRequest): RewindCommitRequest {
@@ -552,6 +630,8 @@ async function runToolCalls(
     device_id: string;
     last_user_text?: string;
     max_rewind_duration_seconds?: number;
+    rewind_buffer_duration_ms?: number;
+    rewind_frame_interval_ms?: number;
     client_context?: SessionHello['context'];
     client_clock_offset_ms?: number;
   },

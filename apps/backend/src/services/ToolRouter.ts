@@ -35,7 +35,7 @@ const CreateRewindSchema = z.object({
   description: z.string().min(1).max(4000),
   entities: z.array(z.unknown()).default([]),
   location_hint: z.string().optional(),
-  rewind_duration_seconds: z.number().int().positive().max(300).optional()
+  rewind_duration_seconds: z.number().positive().max(300).optional()
 });
 const DEFAULT_REWIND_CAPTURE_DURATION_SECONDS = 8;
 const MAX_ENTITIES_PER_REWIND = 16;
@@ -78,6 +78,8 @@ type ToolRouteInput = {
   device_id: string;
   toolCall: ToolCall;
   max_rewind_duration_seconds?: number;
+  rewind_buffer_duration_ms?: number;
+  rewind_frame_interval_ms?: number;
   client_context?: SessionHello['context'];
   client_clock_offset_ms?: number;
 };
@@ -145,9 +147,13 @@ export class ToolRouter {
       location_hint: normalizeOptionalText(rawArgs.location_hint, 160)
     };
     const requestedDurationSeconds = args.rewind_duration_seconds ?? DEFAULT_REWIND_CAPTURE_DURATION_SECONDS;
-    const maxDurationSeconds = input.max_rewind_duration_seconds ?? 60;
-    const rewindDurationSeconds = Math.max(1, Math.min(maxDurationSeconds, requestedDurationSeconds));
-    const captureDurationMs = rewindDurationSeconds * 1000;
+    const bufferDurationMs = positiveInteger(input.rewind_buffer_duration_ms) ?? Math.max(1, input.max_rewind_duration_seconds ?? 60) * 1000;
+    const frameIntervalMs = Math.min(bufferDurationMs, positiveInteger(input.rewind_frame_interval_ms) ?? 1000);
+    const captureDurationMs = quantizedCaptureDurationMs(requestedDurationSeconds * 1000, {
+      bufferDurationMs,
+      frameIntervalMs
+    });
+    const rewindDurationSeconds = captureDurationMs / 1000;
     const backendAnchorUtc = normalizedToolReceivedAt(input.toolCall.received_at);
     const captureAnchorMs = Date.parse(backendAnchorUtc) + Math.round(input.client_clock_offset_ms ?? 0);
     const captureAnchorUtc = utcIso(captureAnchorMs);
@@ -172,6 +178,7 @@ export class ToolRouter {
         rewind_duration_seconds: rewindDurationSeconds,
         capture_anchor_utc: captureAnchorUtc,
         capture_duration_ms: captureDurationMs,
+        capture_frame_interval_ms: frameIntervalMs,
         capture_window_started_at: captureWindowStartedAt,
         capture_window_ended_at: captureWindowEndedAt,
         backend_capture_anchor_utc: backendAnchorUtc,
@@ -188,6 +195,7 @@ export class ToolRouter {
       rewind_duration_seconds: rewindDurationSeconds,
       capture_anchor_utc: captureAnchorUtc,
       capture_duration_ms: captureDurationMs,
+      capture_frame_interval_ms: frameIntervalMs,
       capture_window_started_at: captureWindowStartedAt,
       capture_window_ended_at: captureWindowEndedAt,
       frame_embedding_mode: config.EMBEDDING_MODE,
@@ -230,28 +238,32 @@ export class ToolRouter {
       },
       limit: args.limit
     });
-    const protocolResults = await Promise.all(
-      results.map(async (result): Promise<RewindProtocolResult> => {
-        const details = await this.repository.getRewindDetails({ user_id: userId, event_id: result.id });
-        const frames = result.frames?.length ? result.frames : details?.frames ?? [];
-        return {
-          event_id: result.id,
-          title: result.title,
-          description: result.description,
-          entities: result.entities,
-          location_hint: result.location_hint,
-          started_at: nullableUtcIso(result.started_at),
-          ended_at: nullableUtcIso(result.ended_at),
-          score: {
-            similarity: result.similarity,
-            event_similarity: result.event_similarity,
-            frame_similarity: result.frame_similarity,
-            text_rank: result.text_rank
-          },
-          frame_refs: frames.map(frameRef)
-        };
-      })
-    );
+    const resultFrames = await this.repository.getRewindFrames({
+      user_id: userId,
+      event_ids: results.map((result) => result.id)
+    });
+    const framesByEventId = new Map<string, RewindFrame[]>();
+    for (const frame of resultFrames) {
+      const frames = framesByEventId.get(frame.rewind_event_id);
+      if (frames) frames.push(frame);
+      else framesByEventId.set(frame.rewind_event_id, [frame]);
+    }
+    const protocolResults = results.map((result): RewindProtocolResult => ({
+      event_id: result.id,
+      title: result.title,
+      description: result.description,
+      entities: result.entities,
+      location_hint: result.location_hint,
+      started_at: nullableUtcIso(result.started_at),
+      ended_at: nullableUtcIso(result.ended_at),
+      score: {
+        similarity: result.similarity,
+        event_similarity: result.event_similarity,
+        frame_similarity: result.frame_similarity,
+        text_rank: result.text_rank
+      },
+      frame_refs: (result.frames?.length ? result.frames : framesByEventId.get(result.id) ?? []).map(frameRef)
+    }));
 
     const searchResults: RewindSearchResults = {
       query: args.query,
@@ -271,6 +283,20 @@ function normalizedToolReceivedAt(receivedAt: string | undefined): string {
     return utcIso(receivedAt);
   }
   return utcIso(new Date());
+}
+
+function positiveInteger(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function quantizedCaptureDurationMs(requestedMs: number, input: { bufferDurationMs: number; frameIntervalMs: number }): number {
+  const bufferDurationMs = Math.max(1, Math.round(input.bufferDurationMs));
+  const frameIntervalMs = Math.max(1, Math.min(bufferDurationMs, Math.round(input.frameIntervalMs)));
+  if (!Number.isFinite(requestedMs) || requestedMs <= 0) {
+    throw new Error('rewind_duration_seconds must be greater than zero.');
+  }
+  const clampedMs = Math.min(bufferDurationMs, requestedMs);
+  return Math.max(frameIntervalMs, Math.min(bufferDurationMs, Math.ceil(clampedMs / frameIntervalMs) * frameIntervalMs));
 }
 
 function compactEvent(event: { id: string; status: string; title: string; description: string; entities: string[]; location_hint?: string | null }, rewindDurationSeconds?: number) {
@@ -408,6 +434,18 @@ function normalizeTemporalContext(context: SessionHello['context'] | undefined):
 function inferRelativeTimeRange(query: string, context: TemporalContext): RewindSearchContext['time_range'] | undefined {
   const normalized = query.toLocaleLowerCase('en-US').replace(/\s+/g, ' ').trim();
   const today = localDateParts(context.now, context);
+  const agoMatch = normalized.match(/\b(\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(day|days|week|weeks|month|months)\s+ago\b/);
+  if (agoMatch) {
+    const amount = parseSmallPositiveInteger(agoMatch[1]);
+    if (amount !== undefined) {
+      const unit = agoMatch[2];
+      if (unit.startsWith('day')) return localDayRange(addLocalDays(today, -amount), context);
+      if (unit.startsWith('week')) return localWeekRange(today, -amount, context);
+      if (unit.startsWith('month')) return localMonthRange(today, -amount, context);
+    }
+  }
+  const weekdayMatch = normalized.match(/\b(?:last|previous)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/);
+  if (weekdayMatch) return localDayRange(previousWeekday(today, weekdayIndex(weekdayMatch[1])), context);
   if (/\byesterday\b/.test(normalized)) return localDayRange(addLocalDays(today, -1), context);
   if (/\bthis morning\b|\btoday morning\b/.test(normalized)) return localHourRange(today, 0, 12, context);
   if (/\bthis afternoon\b|\btoday afternoon\b/.test(normalized)) return localHourRange(today, 12, 18, context);
@@ -430,6 +468,25 @@ function inferRelativeTimeRange(query: string, context: TemporalContext): Rewind
   return undefined;
 }
 
+function parseSmallPositiveInteger(value: string): number | undefined {
+  if (/^\d+$/.test(value)) return Math.max(1, Math.min(365, Number(value)));
+  const words: Record<string, number> = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+    eleven: 11,
+    twelve: 12
+  };
+  return words[value];
+}
+
 function localDayRange(day: LocalDateParts, context: TemporalContext): RewindSearchContext['time_range'] {
   return rangeFromLocalDates(day, addLocalDays(day, 1), context);
 }
@@ -443,6 +500,16 @@ function localWeekRange(today: LocalDateParts, weekOffset: number, context: Temp
   const daysSinceMonday = (weekday + 6) % 7;
   const start = addLocalDays(today, -daysSinceMonday + weekOffset * 7);
   return rangeFromLocalDates(start, addLocalDays(start, 7), context);
+}
+
+function previousWeekday(today: LocalDateParts, targetWeekday: number): LocalDateParts {
+  const currentWeekday = dayOfWeek(today);
+  const daysAgo = ((currentWeekday - targetWeekday + 7) % 7) || 7;
+  return addLocalDays(today, -daysAgo);
+}
+
+function weekdayIndex(value: string): number {
+  return ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'].indexOf(value);
 }
 
 function localMonthRange(today: LocalDateParts, monthOffset: number, context: TemporalContext): RewindSearchContext['time_range'] {

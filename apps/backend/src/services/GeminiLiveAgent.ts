@@ -48,6 +48,7 @@ export class GeminiLiveAgent {
   }
 
   getToolDeclarations(): JsonObject[] {
+    const minimumRewindDurationSeconds = Math.min(1, Math.max(1, this.clientSession.frameIntervalMs ?? 1000) / 1000);
     return [
       {
         name: 'create_rewind',
@@ -81,11 +82,11 @@ export class GeminiLiveAgent {
                 'Short physical/spatial hint inferred from the scene, such as office desk, kitchen counter, sofa, backpack, shelf, patio, parking lot, table, or room. Include it when a reliable place, surface, container, or area is visible or mentioned.'
             },
             rewind_duration_seconds: {
-              type: 'integer',
-              minimum: 1,
+              type: 'number',
+              minimum: minimumRewindDurationSeconds,
               maximum: this.clientSession.maxRewindDurationSeconds,
               description:
-                'How many seconds of the phone rolling buffer should be preserved, ending at the backend save-request anchor. If the user says a duration like last 20 seconds or last minute, use that duration clamped to the client buffer. Otherwise infer a dynamic window that covers the coherent current activity or object/location moment without exceeding the available buffer.'
+                'How many seconds of the phone rolling buffer should be preserved, ending at the backend save-request anchor. Must be greater than zero and no longer than the available buffer. Choose a value that can contain at least one captured frame at the reported frame interval.'
             }
           },
           required: ['title', 'description', 'entities', 'rewind_duration_seconds']
@@ -350,6 +351,7 @@ export class GeminiLiveAgent {
 export type NormalizedClientSession = {
   hello: SessionHello;
   bufferDurationMs: number;
+  frameIntervalMs?: number;
   maxRewindDurationSeconds: number;
   clientClockOffsetMs: number;
 };
@@ -406,7 +408,11 @@ function systemInstruction(clientSession: NormalizedClientSession): string {
     '- English save-intent examples: "remember this", "remember that", "save this", "save this moment", "capture this", "record this for later", "bookmark this", "log this", "note this", "keep this", "remember where I put this", "remember where I left X", "remember that I did X", "remind me about this", "remind me where this is", "don\'t let me forget this", "I want to remember this later", "store this memory", "mark this spot", "save where this is".',
     '- Generalize save intent across languages without relying on exact keywords, but only when the utterance is clearly a direct request to preserve/store/remember the current context.',
     '- Do NOT call create_rewind for weak or non-imperative phrases like "this is interesting", "look at this", "wow", "that was cool", "I might need this", "maybe remember", ordinary narration, or a search question. If intent is ambiguous, stay passive or give a brief clarification instead of saving.',
-    `- The trusted phone reports a rolling rewind buffer of ${bufferMs} ms, so rewind_duration_seconds MUST be between 1 and ${maxSeconds}. Never request more than the available buffer; if the coherent activity appears longer, use ${maxSeconds}.`,
+    `- The trusted phone reports a rolling rewind buffer of ${bufferMs} ms, so rewind_duration_seconds MUST be greater than 0 and no more than ${maxSeconds}. Never use 0 or a negative value. Never request more than the available buffer; if the coherent activity appears longer, use ${maxSeconds}.`,
+    frameIntervalMs === undefined
+      ? '- The backend will quantize the rewind window to the device capture cadence and ensure the saved window can contain at least one frame.'
+      : `- Device frame cadence is ${frameIntervalMs} ms. Pick durations at that granularity: with 1000 ms cadence use whole seconds; with sub-second cadence, fractional seconds are allowed only when they align to frame cadence. The selected window must be long enough to include at least one captured frame.`,
+    '- If no positive rewind window is available, do not call create_rewind; briefly say that there is no rewind buffer available to save.',
     '- ALWAYS include rewind_duration_seconds. Priority order: first honor an explicit user duration such as "last 20 seconds", "the last minute", "the past 30 seconds", or "the whole last 45 seconds"; otherwise infer a dynamic replay window from the observed activity duration and context.',
     '- Convert user durations to seconds. Use 20 for "last 20 seconds"; use 60 for "last minute"; clamp anything longer than the reported buffer down to the maximum available buffer. If the user says "last few seconds", choose about 5 seconds.',
     '- Duration inference guidance when no explicit duration is given: first identify the coherent thing the user is asking to preserve, then choose a window that covers that whole span including immediate setup and context. After that span is covered, avoid extra unrelated buffer. A quick static object/location memory usually needs 4-8 seconds; an object shown briefly for about 2 seconds should use about 3-5 seconds; a short discrete action should use 6-12 seconds.',
@@ -434,7 +440,7 @@ function systemInstruction(clientSession: NormalizedClientSession): string {
     '- Call search_rewinds when the user asks where something is, what happened, or asks to find/search/show a memory.',
     '- query should preserve the natural user request plus the likely referent if visible/audible context clarifies it.',
     '- status_text is REQUIRED and should be a concise present-progress sentence that the client can display immediately while the backend searches, such as "Searching your rewinds for the pen...".',
-    '- For date phrases such as today, yesterday, this morning, this week, last week, this month, last month, or last N days/weeks/months, set time_range with UTC ISO datetimes covering the matching client-local period.',
+    '- For date phrases such as today, yesterday, this morning, this week, last week, this month, last month, last N days/weeks/months, N days/weeks/months ago, two days ago, or last Tuesday, set time_range with UTC ISO datetimes covering the matching client-local period.',
     '- Weeks start on Monday. Use started_after as the start of the local period and ended_before as the exclusive end of the local period, converted to UTC ISO datetime with a trailing Z.',
     '- Add entities, time_range, or location_hint only when they narrow the search.',
     '- Search results are returned directly to the phone client by the backend. Do not ask for a second show/display action.',
