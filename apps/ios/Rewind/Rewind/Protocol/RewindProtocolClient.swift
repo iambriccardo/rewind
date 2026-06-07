@@ -142,15 +142,12 @@ actor RewindProtocolClient {
             throw RewindProtocolError.noBufferedFrames
         }
 
-        let localAssetID = "local-\(saveRequest.eventID)"
         let startedAt = frames.first.map { ISO8601DateFormatter.rewindProtocol.string(from: $0.capturedAt) }
         let endedAt = frames.last.map { ISO8601DateFormatter.rewindProtocol.string(from: $0.capturedAt) }
         let clientContext = RewindSessionHello.Context.current()
 
         let commitRequest = RewindCommitRequest(
             eventID: saveRequest.eventID,
-            localAssetID: localAssetID,
-            thumbnailFrameUUID: frames.last?.id,
             startedAt: startedAt,
             endedAt: endedAt,
             location: location.map { capturedLocation in
@@ -162,7 +159,6 @@ actor RewindProtocolClient {
             frames: frames.enumerated().map { index, frame in
                 RewindCommitRequest.Frame(
                     deviceFrameUUID: frame.id,
-                    localAssetID: localAssetID,
                     capturedAt: ISO8601DateFormatter.rewindProtocol.string(from: frame.capturedAt),
                     offsetMs: Self.offsetMilliseconds(for: frame, in: window, fallbackIndex: index),
                     imageBase64: saveRequest.includeFrameImages ? frame.jpegData.base64EncodedString() : nil,

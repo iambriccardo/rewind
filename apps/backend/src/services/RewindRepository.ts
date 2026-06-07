@@ -15,7 +15,6 @@ export type CreatePendingRewindInput = {
   device_id: string;
   title: string;
   description: string;
-  reason?: string;
   entities?: string[];
   location_hint?: string;
   started_at?: string;
@@ -28,15 +27,12 @@ export type CommitRewindInput = {
   event_id: string;
   user_id: string;
   device_id: string;
-  local_asset_id?: string;
-  thumbnail_frame_uuid?: string;
   started_at?: string;
   ended_at?: string;
   location?: { latitude?: number; longitude?: number; location_hint?: string };
   embedding?: number[];
   frames: Array<{
     device_frame_uuid: string;
-    local_asset_id?: string;
     captured_at?: string;
     offset_ms?: number;
     embedding?: number[];
@@ -146,8 +142,6 @@ export class SupabaseRewindRepository implements RewindRepository {
       .from('rewind_events')
       .update({
         status: 'committed',
-        local_asset_id: input.local_asset_id ?? null,
-        thumbnail_frame_uuid: input.thumbnail_frame_uuid ?? null,
         started_at: input.started_at ?? null,
         ended_at: input.ended_at ?? null,
         latitude: input.location?.latitude ?? null,
@@ -168,7 +162,6 @@ export class SupabaseRewindRepository implements RewindRepository {
       user_id: input.user_id,
       device_id: input.device_id,
       device_frame_uuid: frame.device_frame_uuid,
-      local_asset_id: frame.local_asset_id ?? input.local_asset_id ?? null,
       order_index: index,
       captured_at: frame.captured_at ?? null,
       offset_ms: frame.offset_ms ?? null,

@@ -165,7 +165,6 @@ export class ToolRouter {
       device_id: input.device_id,
       title: args.title,
       description: args.description,
-      reason: undefined,
       entities: args.entities,
       location_hint: args.location_hint,
       embedding,

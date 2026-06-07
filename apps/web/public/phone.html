@@ -504,17 +504,6 @@
         els.tools.textContent = line + els.tools.textContent;
       }
 
-      function broadcastGlasses(message) {
-        const payload = { ...message, broadcast_at: Date.now() };
-        try {
-          localStorage.setItem('rewind_glasses_last_event', JSON.stringify(payload));
-          const channel = new BroadcastChannel('rewind-glasses');
-          channel.postMessage(payload);
-          channel.close();
-        } catch {
-        }
-      }
-
       function setStatus(message, stateName = '') {
         els.status.textContent = message;
         if (stateName) els.status.dataset.state = stateName;
@@ -1258,7 +1247,6 @@
             text: message.text,
             data_bytes_base64: message.data?.length
           });
-          if (message.modality === 'text' && message.text) broadcastGlasses(message);
           return;
         }
         if (message.type === 'rewind.search_started') {
@@ -1268,7 +1256,6 @@
           log('Search started', { query: message.query, text: message.text });
           setSummary('Searching', message.text || message.query, 'busy');
           renderSearchStarted(message);
-          broadcastGlasses(message);
           return;
         }
         if (message.type === 'rewind.search_results') {
@@ -1278,7 +1265,6 @@
           log('Search results', { query: message.query, results: message.results.length });
           setSummary('Search complete', `${message.results.length} result${message.results.length === 1 ? '' : 's'} for "${message.query}".`, 'ok');
           await renderSearchResults(message);
-          broadcastGlasses(message);
           return;
         }
         if (message.type === 'error') {
@@ -1302,8 +1288,6 @@
           renderSavedMemory(request, frames.length, 'uploading');
           const upload = {
             event_id: request.event_id,
-            local_asset_id: `local-${request.event_id}`,
-            thumbnail_frame_uuid: frames.at(-1)?.uuid,
             started_at: frames[0]?.capturedAt,
             ended_at: frames.at(-1)?.capturedAt,
             location: state.lastKnownLocation
@@ -1316,7 +1300,6 @@
               const capturedMs = Date.parse(frame.capturedAt);
               const payload = {
                 device_frame_uuid: frame.uuid,
-                local_asset_id: `local-${request.event_id}`,
                 captured_at: frame.capturedAt,
                 offset_ms: Number.isFinite(capturedMs) ? Math.max(0, capturedMs - window.startedAtMs) : index * LOCAL_FRAME_CAPTURE_INTERVAL_MS
               };
@@ -1548,7 +1531,6 @@
         };
         setSummary('Searching', searchStarted.text, 'busy');
         renderSearchStarted(searchStarted);
-        broadcastGlasses(searchStarted);
         try {
           const response = await fetch(backendHttpUrl('/v1/rewinds/search'), {
             method: 'POST',
@@ -1569,7 +1551,6 @@
           log('Manual search results', { query: result.query, results: result.results?.length ?? 0 });
           setSummary('Search complete', `${result.results.length} result${result.results.length === 1 ? '' : 's'} for "${result.query}".`, 'ok');
           await renderSearchResults(result);
-          broadcastGlasses({ type: 'rewind.search_results', ...result });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           setSummary('Search failed', message, 'error');

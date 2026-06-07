@@ -18,15 +18,12 @@ export type RewindEvent = {
   status: 'pending' | 'committed' | 'failed';
   title: string;
   description: string;
-  reason?: string | null;
   entities: string[];
   location_hint?: string | null;
   latitude?: number | null;
   longitude?: number | null;
   started_at?: string | null;
   ended_at?: string | null;
-  local_asset_id?: string | null;
-  thumbnail_frame_uuid?: string | null;
   embedding?: number[] | string | null;
   metadata: JsonObject;
   created_at: string;
@@ -39,7 +36,6 @@ export type RewindFrame = {
   user_id: string;
   device_id: string;
   device_frame_uuid: string;
-  local_asset_id?: string | null;
   order_index: number;
   captured_at?: string | null;
   offset_ms?: number | null;
@@ -97,14 +93,11 @@ export type SessionHello = {
 
 export type RewindCommitRequest = {
   event_id: string;
-  local_asset_id?: string;
-  thumbnail_frame_uuid?: string;
   started_at?: string;
   ended_at?: string;
   location?: { latitude?: number; longitude?: number; location_hint?: string };
   frames: Array<{
     device_frame_uuid: string;
-    local_asset_id?: string;
     captured_at?: string;
     offset_ms?: number;
     image_base64?: string;

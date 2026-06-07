@@ -7,7 +7,6 @@ import { spawn } from 'node:child_process';
 
 const root = resolve(new URL('.', import.meta.url).pathname, '..');
 const publicDir = resolve(root, 'apps/web/public');
-const glassesPublicDir = resolve(root, 'apps/glasses/public');
 const env = readDotenv(resolve(root, '.env.web'));
 const host = process.env.WEB_HOST || env.WEB_HOST || '127.0.0.1';
 const port = Number(process.env.WEB_PORT || env.WEB_PORT || 8788);
@@ -71,23 +70,14 @@ server.listen(port, host, () => {
   const baseUrl = `${protocol}://${host === '0.0.0.0' ? 'localhost' : host}:${port}`;
   const url = `${baseUrl}/phone.html`;
   console.log(`Phone web app: ${url}`);
-  console.log(`Glasses web app: ${baseUrl}/glasses.html`);
-  console.log(`Glasses simulator: ${baseUrl}/glasses-sim.html`);
   console.log(`Backend URL: ${backendUrl}`);
   console.log(`Device frame store: ${frameStoreDir}`);
   if (openBrowser) openUrl(url);
 });
 
 function resolvePublicFile(pathname) {
-  const roots = pathname === '/glasses.html' || pathname.startsWith('/glasses/')
-    ? [glassesPublicDir, publicDir]
-    : [publicDir, glassesPublicDir];
-
-  for (const rootDir of roots) {
-    const filePath = resolve(rootDir, `.${pathname}`);
-    if (filePath.startsWith(`${rootDir}${sep}`) && existsSync(filePath)) return filePath;
-  }
-
+  const filePath = resolve(publicDir, `.${pathname}`);
+  if (filePath.startsWith(`${publicDir}${sep}`) && existsSync(filePath)) return filePath;
   return null;
 }
 

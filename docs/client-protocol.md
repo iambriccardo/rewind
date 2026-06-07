@@ -334,8 +334,6 @@ Payload:
 ```json
 {
   "event_id": "rewind-event-uuid",
-  "local_asset_id": "client-local-asset-id",
-  "thumbnail_frame_uuid": "client-frame-uuid",
   "started_at": "2026-06-06T15:29:52.000Z",
   "ended_at": "2026-06-06T15:30:00.000Z",
   "location": {
@@ -346,7 +344,6 @@ Payload:
   "frames": [
     {
       "device_frame_uuid": "client-frame-uuid",
-      "local_asset_id": "client-local-asset-id",
       "captured_at": "2026-06-06T15:29:59.000Z",
       "offset_ms": 7000
     }

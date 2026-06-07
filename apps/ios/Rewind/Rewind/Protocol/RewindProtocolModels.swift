@@ -239,8 +239,6 @@ nonisolated struct RewindProtocolResult: Decodable, Identifiable, Sendable {
 
 nonisolated struct RewindCommitRequest: Encodable, Sendable {
     let eventID: String
-    let localAssetID: String
-    let thumbnailFrameUUID: String?
     let startedAt: String?
     let endedAt: String?
     let location: Location?
@@ -249,8 +247,6 @@ nonisolated struct RewindCommitRequest: Encodable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case eventID = "event_id"
-        case localAssetID = "local_asset_id"
-        case thumbnailFrameUUID = "thumbnail_frame_uuid"
         case startedAt = "started_at"
         case endedAt = "ended_at"
         case location
@@ -265,7 +261,6 @@ nonisolated struct RewindCommitRequest: Encodable, Sendable {
 
     nonisolated struct Frame: Encodable, Sendable {
         let deviceFrameUUID: String
-        let localAssetID: String
         let capturedAt: String
         let offsetMs: Int
         let imageBase64: String?
@@ -273,7 +268,6 @@ nonisolated struct RewindCommitRequest: Encodable, Sendable {
 
         enum CodingKeys: String, CodingKey {
             case deviceFrameUUID = "device_frame_uuid"
-            case localAssetID = "local_asset_id"
             case capturedAt = "captured_at"
             case offsetMs = "offset_ms"
             case imageBase64 = "image_base64"
