@@ -211,13 +211,19 @@ begin
       case
         when nullif(trim(coalesce(p_query_text, '')), '') is null then null
         else (
-          select to_tsquery('simple', string_agg(token || ':*', ' | '))
+          select case
+            when token_text is null then null
+            else to_tsquery('simple', token_text)
+          end
           from (
-            select regexp_replace(raw_token, '[^a-z0-9]', '', 'g') as token
-            from regexp_split_to_table(lower(p_query_text), '\s+') raw_token
-          ) tokens
-          where length(token) > 2
-            and token not in ('where', 'what', 'when', 'with', 'this', 'that', 'there', 'have', 'about', 'left', 'leave', 'leaving', 'put', 'did', 'are', 'the', 'and', 'you', 'for', 'from')
+            select string_agg(token || ':*', ' | ') as token_text
+            from (
+              select regexp_replace(raw_token, '[^a-z0-9]', '', 'g') as token
+              from regexp_split_to_table(lower(p_query_text), '\s+') raw_token
+            ) tokens
+            where length(token) > 2
+              and token not in ('where', 'what', 'when', 'with', 'this', 'that', 'there', 'have', 'about', 'left', 'leave', 'leaving', 'put', 'did', 'are', 'the', 'and', 'you', 'for', 'from')
+          ) prepared
         )
       end as token_query
   ),
@@ -237,7 +243,7 @@ begin
       and (p_entities is null or array_length(p_entities, 1) is null or e.entities && p_entities)
       and (q.location_text is null or e.location_hint ilike '%' || q.location_text || '%')
       and (p_started_after is null or coalesce(e.ended_at, e.started_at, e.created_at) >= p_started_after)
-      and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) <= p_ended_before)
+      and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) < p_ended_before)
     order by e.embedding operator(extensions.<=>) p_query_embedding
     limit v_candidate_limit
   ),
@@ -262,7 +268,7 @@ begin
         and (p_entities is null or array_length(p_entities, 1) is null or e.entities && p_entities)
         and (q.location_text is null or e.location_hint ilike '%' || q.location_text || '%')
         and (p_started_after is null or coalesce(e.ended_at, e.started_at, e.created_at) >= p_started_after)
-        and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) <= p_ended_before)
+        and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) < p_ended_before)
       order by f.embedding operator(extensions.<=>) p_query_embedding
       limit v_candidate_limit
     ) ranked
@@ -290,7 +296,7 @@ begin
       and (p_entities is null or array_length(p_entities, 1) is null or e.entities && p_entities)
       and (q.location_text is null or e.location_hint ilike '%' || q.location_text || '%')
       and (p_started_after is null or coalesce(e.ended_at, e.started_at, e.created_at) >= p_started_after)
-      and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) <= p_ended_before)
+      and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) < p_ended_before)
     order by text_rank desc
     limit v_candidate_limit
   ),
@@ -309,7 +315,7 @@ begin
       and (p_entities is null or array_length(p_entities, 1) is null or e.entities && p_entities)
       and (q.location_text is null or e.location_hint ilike '%' || q.location_text || '%')
       and (p_started_after is null or coalesce(e.ended_at, e.started_at, e.created_at) >= p_started_after)
-      and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) <= p_ended_before)
+      and (p_ended_before is null or coalesce(e.started_at, e.ended_at, e.created_at) < p_ended_before)
     order by e.created_at desc
     limit v_candidate_limit
   ),

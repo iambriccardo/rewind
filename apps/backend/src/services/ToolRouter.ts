@@ -55,6 +55,56 @@ const GENERIC_ENTITIES = new Set([
   'this',
   'user'
 ]);
+const GENERIC_SEARCH_TERMS = new Set([
+  'a',
+  'an',
+  'are',
+  'around',
+  'at',
+  'about',
+  'did',
+  'do',
+  'during',
+  'find',
+  'for',
+  'from',
+  'happened',
+  'had',
+  'have',
+  'i',
+  'in',
+  'is',
+  'latest',
+  'locate',
+  'look',
+  'me',
+  'memories',
+  'memory',
+  'my',
+  'of',
+  'on',
+  'please',
+  'previous',
+  'put',
+  'recent',
+  'remind',
+  'rewind',
+  'rewinds',
+  'search',
+  'show',
+  'tell',
+  'the',
+  'this',
+  'that',
+  'these',
+  'those',
+  'to',
+  'was',
+  'were',
+  'what',
+  'when',
+  'where'
+]);
 
 const SearchRewindsSchema = z.object({
   query: z.string().min(1).max(1000),
@@ -222,13 +272,14 @@ export class ToolRouter {
       location_hint: normalizeOptionalText(rawSearchArgs.location_hint, 160),
       context: normalizedContext
     };
-    const queryEmbedding = await this.embeddings.embedQuery(args.query);
     const entities = args.entities.length ? args.entities : args.context?.entities;
     const locationHint = args.location_hint ?? args.context?.location_hint;
     const timeRange = normalizeTimeRange(args.time_range ?? args.context?.time_range ?? inferRelativeTimeRange(args.query, clientContext));
+    const contentQuery = searchContentQuery(args.query);
+    const queryEmbedding = contentQuery ? await this.embeddings.embedQuery(contentQuery) : undefined;
     const results = await this.repository.searchRewinds({
       user_id: userId,
-      query: args.query,
+      query: contentQuery,
       query_embedding: queryEmbedding,
       context: {
         ...(args.context ?? {}),
@@ -401,6 +452,36 @@ function normalizeOptionalText(value: string | undefined, maxLength: number): st
   return normalized || undefined;
 }
 
+function searchContentQuery(query: string): string | undefined {
+  let content = query
+    .replace(/\b(?:just now|recently|a moment ago|a few minutes ago|earlier today)\b/gi, ' ')
+    .replace(
+      /\b(?:in\s+the\s+)?(?:last|past)\s+(?:hour|\d{1,3}\s+(?:minute|minutes|hour|hours|day|days|week|weeks|month|months))\b/gi,
+      ' '
+    )
+    .replace(
+      /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d{1,3})\s+(?:minute|minutes|hour|hours|day|days|week|weeks|month|months)\s+ago\b/gi,
+      ' '
+    )
+    .replace(/\b(?:around|about|near|at)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b/gi, ' ')
+    .replace(/\b(?:last|previous)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|month)\b/gi, ' ')
+    .replace(/\b(?:this|current)\s+(?:morning|afternoon|evening|week|month)\b/gi, ' ')
+    .replace(/\b(?:today|yesterday|tonight)\b/gi, ' ');
+
+  content = stripWrapperPunctuation(content)
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 1000);
+
+  if (!content) return undefined;
+  const meaningfulTokens = content
+    .toLocaleLowerCase('en-US')
+    .match(/[\p{L}\p{N}]+/gu)
+    ?.filter((token) => !GENERIC_SEARCH_TERMS.has(token));
+  return meaningfulTokens?.length ? meaningfulTokens.join(' ').slice(0, 1000) : undefined;
+}
+
 function stripWrapperPunctuation(value: string): string {
   let normalized = value.normalize('NFKC').trim();
   for (let index = 0; index < 3; index += 1) {
@@ -423,6 +504,11 @@ type LocalDateParts = {
   day: number;
 };
 
+type LocalDateTimeParts = LocalDateParts & {
+  hour?: number;
+  minute?: number;
+};
+
 function normalizeTemporalContext(context: SessionHello['context'] | undefined): TemporalContext {
   const now = isValidInstant(context?.current_time) ? new Date(context.current_time) : new Date();
   const timeZone = context?.time_zone && isValidTimeZone(context.time_zone) ? context.time_zone : undefined;
@@ -434,16 +520,35 @@ function normalizeTemporalContext(context: SessionHello['context'] | undefined):
 function inferRelativeTimeRange(query: string, context: TemporalContext): RewindSearchContext['time_range'] | undefined {
   const normalized = query.toLocaleLowerCase('en-US').replace(/\s+/g, ' ').trim();
   const today = localDateParts(context.now, context);
-  const agoMatch = normalized.match(/\b(\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(day|days|week|weeks|month|months)\s+ago\b/);
+  if (/\bjust now\b|\brecently\b|\ba moment ago\b|\ba few minutes ago\b/.test(normalized)) {
+    return rollingUtcRange(context.now, 5, 'minute');
+  }
+
+  const agoMatch = normalized.match(
+    /\b(\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(minute|minutes|hour|hours|day|days|week|weeks|month|months)\s+ago\b/
+  );
   if (agoMatch) {
     const amount = parseSmallPositiveInteger(agoMatch[1]);
     if (amount !== undefined) {
       const unit = agoMatch[2];
+      if (unit.startsWith('minute')) return relativeMinuteRange(context.now, amount);
+      if (unit.startsWith('hour')) return relativeHourRange(context.now, amount);
       if (unit.startsWith('day')) return localDayRange(addLocalDays(today, -amount), context);
       if (unit.startsWith('week')) return localWeekRange(today, -amount, context);
       if (unit.startsWith('month')) return localMonthRange(today, -amount, context);
     }
   }
+
+  const clockMatch = normalized.match(/\b(?:around|about|near|at)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/);
+  if (clockMatch) {
+    const localTime = parseClockTime(clockMatch);
+    if (localTime) {
+      const rangeDay = /yesterday/.test(normalized) ? addLocalDays(today, -1) : today;
+      const radiusMinutes = /around|about|near/.test(clockMatch[0]) ? 15 : 0;
+      return localMinuteWindow(rangeDay, localTime.hour, localTime.minute, radiusMinutes, context);
+    }
+  }
+
   const weekdayMatch = normalized.match(/\b(?:last|previous)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/);
   if (weekdayMatch) return localDayRange(previousWeekday(today, weekdayIndex(weekdayMatch[1])), context);
   if (/\byesterday\b/.test(normalized)) return localDayRange(addLocalDays(today, -1), context);
@@ -456,10 +561,14 @@ function inferRelativeTimeRange(query: string, context: TemporalContext): Rewind
   if (/\bthis month\b/.test(normalized)) return localMonthRange(today, 0, context);
   if (/\blast month\b|\bprevious month\b/.test(normalized)) return localMonthRange(today, -1, context);
 
-  const lastMatch = normalized.match(/\b(?:last|past)\s+(\d{1,3})\s+(day|days|week|weeks|month|months)\b/);
+  if (/\b(?:last|past)\s+hour\b|\bin the last hour\b/.test(normalized)) return rollingUtcRange(context.now, 1, 'hour');
+
+  const lastMatch = normalized.match(/\b(?:last|past|in the last)\s+(\d{1,3})\s+(minute|minutes|hour|hours|day|days|week|weeks|month|months)\b/);
   if (lastMatch) {
     const amount = Math.max(1, Math.min(365, Number(lastMatch[1])));
     const unit = lastMatch[2];
+    if (unit.startsWith('minute')) return rollingUtcRange(context.now, amount, 'minute');
+    if (unit.startsWith('hour')) return rollingUtcRange(context.now, amount, 'hour');
     if (unit.startsWith('day')) return rangeFromLocalDates(addLocalDays(today, -amount), addLocalDays(today, 1), context);
     if (unit.startsWith('week')) return rangeFromLocalDates(addLocalDays(today, -amount * 7), addLocalDays(today, 1), context);
     if (unit.startsWith('month')) return rangeFromLocalDates(addLocalMonths(today, -amount), addLocalDays(today, 1), context);
@@ -487,12 +596,65 @@ function parseSmallPositiveInteger(value: string): number | undefined {
   return words[value];
 }
 
+function rollingUtcRange(now: Date, amount: number, unit: 'minute' | 'hour'): RewindSearchContext['time_range'] {
+  const minutes = unit === 'hour' ? amount * 60 : amount;
+  return {
+    started_after: utcIso(now.getTime() - minutes * 60_000),
+    ended_before: utcIso(now)
+  };
+}
+
+function relativeMinuteRange(now: Date, minutesAgo: number): RewindSearchContext['time_range'] {
+  const start = floorUtcMinute(new Date(now.getTime() - minutesAgo * 60_000));
+  return {
+    started_after: utcIso(start),
+    ended_before: utcIso(start.getTime() + 60_000)
+  };
+}
+
+function relativeHourRange(now: Date, hoursAgo: number): RewindSearchContext['time_range'] {
+  const start = floorUtcHour(new Date(now.getTime() - hoursAgo * 60 * 60_000));
+  return {
+    started_after: utcIso(start),
+    ended_before: utcIso(start.getTime() + 60 * 60_000)
+  };
+}
+
+function floorUtcMinute(date: Date): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), date.getUTCHours(), date.getUTCMinutes()));
+}
+
+function floorUtcHour(date: Date): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), date.getUTCHours()));
+}
+
+function parseClockTime(match: RegExpMatchArray): { hour: number; minute: number } | undefined {
+  let hour = Number(match[1]);
+  const minute = match[2] === undefined ? 0 : Number(match[2]);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || minute < 0 || minute > 59) return undefined;
+  const meridiem = match[3];
+  if (meridiem) {
+    if (hour < 1 || hour > 12) return undefined;
+    if (meridiem === 'pm' && hour !== 12) hour += 12;
+    if (meridiem === 'am' && hour === 12) hour = 0;
+  } else if (hour < 0 || hour > 23) {
+    return undefined;
+  }
+  return { hour, minute };
+}
+
 function localDayRange(day: LocalDateParts, context: TemporalContext): RewindSearchContext['time_range'] {
   return rangeFromLocalDates(day, addLocalDays(day, 1), context);
 }
 
 function localHourRange(day: LocalDateParts, startHour: number, endHour: number, context: TemporalContext): RewindSearchContext['time_range'] {
   return rangeFromLocalDateTimes({ ...day, hour: startHour }, { ...day, hour: endHour }, context);
+}
+
+function localMinuteWindow(day: LocalDateParts, hour: number, minute: number, radiusMinutes: number, context: TemporalContext): RewindSearchContext['time_range'] {
+  const start = addLocalMinutes({ ...day, hour, minute }, -radiusMinutes);
+  const end = addLocalMinutes({ ...day, hour, minute }, radiusMinutes || 1);
+  return rangeFromLocalDateTimes(start, end, context);
 }
 
 function localWeekRange(today: LocalDateParts, weekOffset: number, context: TemporalContext): RewindSearchContext['time_range'] {
@@ -521,11 +683,7 @@ function rangeFromLocalDates(start: LocalDateParts, end: LocalDateParts, context
   return rangeFromLocalDateTimes({ ...start, hour: 0 }, { ...end, hour: 0 }, context);
 }
 
-function rangeFromLocalDateTimes(
-  start: LocalDateParts & { hour: number },
-  end: LocalDateParts & { hour: number },
-  context: TemporalContext
-): RewindSearchContext['time_range'] {
+function rangeFromLocalDateTimes(start: LocalDateTimeParts, end: LocalDateTimeParts, context: TemporalContext): RewindSearchContext['time_range'] {
   return {
     started_after: localDateTimeToUtcIso(start, context),
     ended_before: localDateTimeToUtcIso(end, context)
@@ -554,13 +712,14 @@ function localDateParts(date: Date, context: TemporalContext): LocalDateParts {
   };
 }
 
-function localDateTimeToUtcIso(day: LocalDateParts & { hour?: number }, context: TemporalContext): string {
+function localDateTimeToUtcIso(day: LocalDateTimeParts, context: TemporalContext): string {
   const hour = day.hour ?? 0;
+  const minute = day.minute ?? 0;
   if (!context.timeZone) {
     const offsetMs = (context.utcOffsetMinutes ?? 0) * 60_000;
-    return new Date(Date.UTC(day.year, day.month - 1, day.day, hour) - offsetMs).toISOString();
+    return new Date(Date.UTC(day.year, day.month - 1, day.day, hour, minute) - offsetMs).toISOString();
   }
-  const targetUtc = Date.UTC(day.year, day.month - 1, day.day, hour);
+  const targetUtc = Date.UTC(day.year, day.month - 1, day.day, hour, minute);
   let utc = targetUtc;
   for (let index = 0; index < 3; index += 1) {
     const actual = zonedDateTimeParts(new Date(utc), context.timeZone);
@@ -600,6 +759,17 @@ function addLocalDays(day: LocalDateParts, amount: number): LocalDateParts {
 function addLocalMonths(day: LocalDateParts, amount: number): LocalDateParts {
   const date = new Date(Date.UTC(day.year, day.month - 1 + amount, day.day));
   return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() };
+}
+
+function addLocalMinutes(day: LocalDateTimeParts, amount: number): LocalDateTimeParts {
+  const date = new Date(Date.UTC(day.year, day.month - 1, day.day, day.hour ?? 0, (day.minute ?? 0) + amount));
+  return {
+    year: date.getUTCFullYear(),
+    month: date.getUTCMonth() + 1,
+    day: date.getUTCDate(),
+    hour: date.getUTCHours(),
+    minute: date.getUTCMinutes()
+  };
 }
 
 function dayOfWeek(day: LocalDateParts): number {

@@ -48,7 +48,7 @@ export class GeminiLiveAgent {
   }
 
   getToolDeclarations(): JsonObject[] {
-    const minimumRewindDurationSeconds = Math.min(1, Math.max(1, this.clientSession.frameIntervalMs ?? 1000) / 1000);
+    const minimumRewindDurationSeconds = Math.min(this.clientSession.maxRewindDurationSeconds, Math.max(1, this.clientSession.frameIntervalMs ?? 1000) / 1000);
     return [
       {
         name: 'create_rewind',
@@ -100,7 +100,11 @@ export class GeminiLiveAgent {
           type: 'object',
           additionalProperties: false,
           properties: {
-            query: { type: 'string' },
+            query: {
+              type: 'string',
+              description:
+                'Content-focused natural-language search text. Keep the object, person, place, action, visible label, or event being searched for. Put timing in time_range, places in location_hint, and exact labels in entities instead of padding query with control words. For time-only requests, use a short generic phrase such as "recent memories".'
+            },
             status_text: {
               type: 'string',
               description:
@@ -110,7 +114,7 @@ export class GeminiLiveAgent {
             time_range: {
               type: 'object',
               description:
-                'Optional UTC ISO datetime range. Use this for relative date requests such as today, yesterday, this week, last week, this month, last month, or last N days/weeks/months. Resolve the semantic period in the client timezone, then emit UTC instants.',
+                'Optional UTC ISO datetime range. Use this for relative time/date requests such as just now, last N minutes/hours, N minutes/hours ago, today, yesterday, around 2:30, this week, last week, this month, last month, or last N days/weeks/months. Resolve the semantic period in the client timezone, then emit UTC instants.',
               additionalProperties: false,
               properties: {
                 started_after: { type: 'string', description: 'Inclusive lower bound as a UTC ISO datetime ending in Z.' },
@@ -438,9 +442,11 @@ function systemInstruction(clientSession: NormalizedClientSession): string {
     '',
     '# Search Rewinds',
     '- Call search_rewinds when the user asks where something is, what happened, or asks to find/search/show a memory.',
-    '- query should preserve the natural user request plus the likely referent if visible/audible context clarifies it.',
+    '- query is for semantic/text retrieval content, not for filter syntax. Keep the object, person, place, action, visible text, or event being searched for. Remove pure control words and do not rely on query text to express time when time_range can express it.',
+    '- Examples: "where is the pen I had today" should use query "pen" plus today\'s time_range; "show the park from two days ago" should use query "park" plus that local day range; "what happened in the last 10 minutes" should use a short generic query such as "recent memories" plus the rolling time_range.',
     '- status_text is REQUIRED and should be a concise present-progress sentence that the client can display immediately while the backend searches, such as "Searching your rewinds for the pen...".',
-    '- For date phrases such as today, yesterday, this morning, this week, last week, this month, last month, last N days/weeks/months, N days/weeks/months ago, two days ago, or last Tuesday, set time_range with UTC ISO datetimes covering the matching client-local period.',
+    '- For time/date phrases such as just now, recently, last 10 minutes, in the last hour, five minutes ago, two hours ago, around 2:30, at 14:05, today, yesterday, this morning, this week, last week, this month, last month, last N days/weeks/months, N days/weeks/months ago, two days ago, or last Tuesday, set time_range with UTC ISO datetimes covering the matching client-local period.',
+    '- Minute-level search should be precise: "at 14:05" means the local minute [14:05, 14:06); "around 14:05" means a small local window around that minute; "10 minutes ago" means the local/UTC minute that occurred 10 minutes before the current client time; "last 10 minutes" means the rolling interval ending now.',
     '- Weeks start on Monday. Use started_after as the start of the local period and ended_before as the exclusive end of the local period, converted to UTC ISO datetime with a trailing Z.',
     '- Add entities, time_range, or location_hint only when they narrow the search.',
     '- Search results are returned directly to the phone client by the backend. Do not ask for a second show/display action.',
