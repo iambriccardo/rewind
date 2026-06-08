@@ -34,13 +34,30 @@ struct LiveCapture: View {
                 .allowsHitTesting(false)
                 .zIndex(20)
 
-            if liveStore.isSearchBusy {
-                LiveSearchStatusBanner(text: liveStore.searchStatusText)
-                    .padding(.top, 18)
-                    .padding(.horizontal, 18)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .zIndex(30)
+            if liveStore.isSaving {
+                LiveProgressStatusBanner(
+                    text: liveStore.saveStatusText,
+                    fallbackText: "Remembering this rewind.",
+                    systemImage: "sparkles",
+                    tint: .green
+                )
+                .padding(.top, 18)
+                .padding(.horizontal, 18)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .zIndex(30)
+            } else if liveStore.isSearchBusy {
+                LiveProgressStatusBanner(
+                    text: liveStore.searchStatusText,
+                    fallbackText: "Searching your rewinds.",
+                    systemImage: "magnifyingglass",
+                    tint: .white
+                )
+                .padding(.top, 18)
+                .padding(.horizontal, 18)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .zIndex(30)
             }
 
             VStack {
@@ -92,11 +109,12 @@ struct LiveCapture: View {
             }
         }
         .onChange(of: liveStore.status) { _, status in
-            if case .saved = status {
-                showRememberedBanner()
+            if case let .saved(title, _) = status {
+                showRememberedBanner(title: title)
             }
         }
         .animation(.smooth(duration: 0.24), value: liveStore.isSearchBusy)
+        .animation(.smooth(duration: 0.24), value: liveStore.isSaving)
     }
 
     @ViewBuilder
@@ -118,8 +136,9 @@ struct LiveCapture: View {
 #endif
     }
 
-    private func showRememberedBanner() {
-        let banner = CaptureRememberedBannerItem(title: "Remembered")
+    private func showRememberedBanner(title: String) {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let banner = CaptureRememberedBannerItem(title: trimmedTitle.isEmpty ? "Remembered" : "Remembered \(trimmedTitle)")
 
         withAnimation(.smooth(duration: 0.24)) {
             rememberedBanners.insert(banner, at: 0)
@@ -137,38 +156,45 @@ struct LiveCapture: View {
     }
 }
 
-private struct LiveSearchStatusBanner: View {
+private struct LiveProgressStatusBanner: View {
     let text: String?
+    let fallbackText: String
+    let systemImage: String
+    let tint: Color
     @State private var isPulsing = false
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             ZStack {
                 Circle()
-                    .stroke(.white.opacity(isPulsing ? 0.10 : 0.34), lineWidth: 7)
-                    .frame(width: isPulsing ? 42 : 30, height: isPulsing ? 42 : 30)
+                    .stroke(tint.opacity(isPulsing ? 0.12 : 0.34), lineWidth: 7)
+                    .frame(width: isPulsing ? 46 : 32, height: isPulsing ? 46 : 32)
 
-                Image(systemName: "magnifyingglass")
+                Image(systemName: systemImage)
                     .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(tint)
             }
-            .frame(width: 44, height: 44)
-            .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: isPulsing)
+            .frame(width: 48, height: 48)
+            .animation(.easeInOut(duration: 0.95).repeatForever(autoreverses: true), value: isPulsing)
 
-            Text(text ?? "Searching your rewinds.")
+            Text(text ?? fallbackText)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white)
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
 
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 14)
+        .padding(.leading, 10)
+        .padding(.trailing, 16)
         .padding(.vertical, 10)
         .frame(maxWidth: 420)
-        .glassEffect(.regular.interactive(false), in: Capsule())
+        .background(.black.opacity(0.18), in: Capsule())
+        .glassEffect(.regular.tint(tint.opacity(0.18)).interactive(false), in: Capsule())
+        .shadow(color: tint.opacity(0.18), radius: 22, y: 8)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(text ?? "Searching your rewinds.")
+        .accessibilityLabel(text ?? fallbackText)
         .onAppear {
             isPulsing = true
         }

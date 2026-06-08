@@ -134,6 +134,49 @@ nonisolated struct RewindAgentMedia: Decodable, Sendable {
         case data
         case text
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.modality = try container.decode(String.self, forKey: .modality)
+        self.mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType)
+        self.data = try container.decodeIfPresent(FlexibleBase64Data.self, forKey: .data)?.base64String
+        self.text = try container.decodeIfPresent(String.self, forKey: .text)
+    }
+}
+
+/// Decodes backend media payloads that may arrive as a base64 string or a JSON
+/// byte array/Buffer-shaped object if an upstream SDK returns binary data.
+nonisolated private struct FlexibleBase64Data: Decodable {
+    let base64String: String
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+
+        if let string = try? container.decode(String.self) {
+            self.base64String = string
+            return
+        }
+
+        if let bytes = try? container.decode([UInt8].self) {
+            self.base64String = Data(bytes).base64EncodedString()
+            return
+        }
+
+        let keyedContainer = try decoder.container(keyedBy: CodingKeys.self)
+        if let bytes = try? keyedContainer.decode([UInt8].self, forKey: .data) {
+            self.base64String = Data(bytes).base64EncodedString()
+            return
+        }
+
+        throw DecodingError.dataCorruptedError(
+            in: container,
+            debugDescription: "Expected base64 string, byte array, or Buffer-shaped object."
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case data
+    }
 }
 
 nonisolated struct RewindSaveRequest: Decodable, Identifiable, Sendable {
@@ -142,7 +185,8 @@ nonisolated struct RewindSaveRequest: Decodable, Identifiable, Sendable {
     let uploadURL: String
     let title: String
     let description: String
-    let rewindDurationSeconds: Int
+    let statusText: String
+    let rewindDurationSeconds: Double
     let captureAnchorUTC: String?
     let captureDurationMs: Int?
     let captureWindowStartedAt: String?
@@ -158,6 +202,7 @@ nonisolated struct RewindSaveRequest: Decodable, Identifiable, Sendable {
         case uploadURL = "upload_url"
         case title
         case description
+        case statusText = "status_text"
         case rewindDurationSeconds = "rewind_duration_seconds"
         case captureAnchorUTC = "capture_anchor_utc"
         case captureDurationMs = "capture_duration_ms"
@@ -165,6 +210,23 @@ nonisolated struct RewindSaveRequest: Decodable, Identifiable, Sendable {
         case captureWindowEndedAt = "capture_window_ended_at"
         case includeFrameImages = "include_frame_images"
         case frameEmbeddingMode = "frame_embedding_mode"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.requestID = try container.decode(String.self, forKey: .requestID)
+        self.eventID = try container.decode(String.self, forKey: .eventID)
+        self.uploadURL = try container.decode(String.self, forKey: .uploadURL)
+        self.title = try container.decode(String.self, forKey: .title)
+        self.description = try container.decode(String.self, forKey: .description)
+        self.statusText = try container.decodeIfPresent(String.self, forKey: .statusText) ?? "Remembering \(title)."
+        self.rewindDurationSeconds = try container.decode(Double.self, forKey: .rewindDurationSeconds)
+        self.captureAnchorUTC = try container.decodeIfPresent(String.self, forKey: .captureAnchorUTC)
+        self.captureDurationMs = try container.decodeIfPresent(Int.self, forKey: .captureDurationMs)
+        self.captureWindowStartedAt = try container.decodeIfPresent(String.self, forKey: .captureWindowStartedAt)
+        self.captureWindowEndedAt = try container.decodeIfPresent(String.self, forKey: .captureWindowEndedAt)
+        self.includeFrameImages = try container.decode(Bool.self, forKey: .includeFrameImages)
+        self.frameEmbeddingMode = try container.decode(String.self, forKey: .frameEmbeddingMode)
     }
 }
 

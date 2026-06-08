@@ -193,6 +193,54 @@ actor CaptureFrameCache {
         }
     }
 
+    /// Loads the newest cached frame available across all local capture days.
+    ///
+    /// The Today screen uses this to start from the most recent known capture
+    /// instead of assuming the current clock time has a frame available.
+    func latestFrame() async -> CachedCaptureFrame? {
+        guard FileManager.default.fileExists(atPath: rootDirectory.path) else {
+            return nil
+        }
+
+        do {
+            let dayDirectories = try FileManager.default.contentsOfDirectory(
+                at: rootDirectory,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+
+            var latestFrame: CachedCaptureFrame?
+            for dayDirectory in dayDirectories {
+                let resourceValues = try dayDirectory.resourceValues(forKeys: [.isDirectoryKey])
+                guard resourceValues.isDirectory == true else {
+                    continue
+                }
+
+                let indexURL = dayDirectory.appendingPathComponent("index.json")
+                let index = try loadIndex(from: indexURL)
+                for indexFrame in index.frames {
+                    let cachedFrame = CachedCaptureFrame(indexFrame: indexFrame, dayDirectory: dayDirectory)
+                    guard FileManager.default.fileExists(atPath: cachedFrame.fileURL.path) else {
+                        continue
+                    }
+
+                    if let currentLatestFrame = latestFrame {
+                        if cachedFrame.timestamp > currentLatestFrame.timestamp {
+                            latestFrame = cachedFrame
+                        }
+                    } else {
+                        latestFrame = cachedFrame
+                    }
+                }
+            }
+
+            return latestFrame
+        } catch {
+            logger.error("Failed to load latest cached capture frame: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
     /// Finds the cached phone frame closest to a timestamp.
     ///
     /// Backend search results can reference server-side frame rows that are not

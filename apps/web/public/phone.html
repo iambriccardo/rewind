@@ -614,7 +614,7 @@
         const durationSeconds = Math.round((captureDurationMs(request) / 1000) * 10) / 10;
         const card = memoryCard({
           title: request.title,
-          description: request.description,
+          description: request.status_text || request.description,
           meta: [
             `${frameCount} frames`,
             `${durationSeconds}s`,
@@ -1458,7 +1458,7 @@
         if (message.type === 'rewind.save_request') {
           protocolLog('rewind.save_request', message);
           const durationSeconds = Math.round((captureDurationMs(message) / 1000) * 10) / 10;
-          setSummary('Saving rewind', `${message.title} · ${durationSeconds}s`, 'busy');
+          setSummary('Saving rewind', message.status_text || `${message.title} · ${durationSeconds}s`, 'busy');
           renderSavedMemory(message, 0, 'uploading');
           void captureAndUploadRewind(message);
           return;

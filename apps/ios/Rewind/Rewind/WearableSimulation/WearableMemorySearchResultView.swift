@@ -41,6 +41,8 @@ struct WearableMemorySearchResultView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            imageCard
+
             if let result, !isSearching, errorMessage == nil {
                 Text(result.title)
                     .font(.title2.weight(.semibold))
@@ -49,8 +51,6 @@ struct WearableMemorySearchResultView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal)
             }
-
-            imageCard
         }
         .frame(width: 172, alignment: .leading)
         .opacity(isVisible ? 1 : 0)
@@ -102,7 +102,7 @@ struct WearableMemorySearchResultView: View {
         .aspectRatio(2.0 / 3.0, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
-        .glassEffect(.regular.interactive(false), in: RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
+        .glassEffect(.clear.interactive(false), in: RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
     }
 
     @ViewBuilder
@@ -122,15 +122,18 @@ struct WearableMemorySearchResultView: View {
                 .fill(.black.opacity(0.34))
                 .overlay {
                     if isSearching {
-                        VStack(spacing: 10) {
+                        VStack(spacing: 12) {
                             SearchPulseGlyph()
 
-                            Text(statusText ?? query.map { "Searching for \($0)." } ?? "Searching your rewinds.")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.white)
-                                .multilineTextAlignment(.center)
-                                .lineLimit(3)
-                                .padding(.horizontal, 12)
+                            if let searchProgressText {
+                                Text(searchProgressText)
+                                    .font(.callout.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                    .multilineTextAlignment(.center)
+                                    .lineLimit(3)
+                                    .minimumScaleFactor(0.78)
+                                    .padding(.horizontal, 14)
+                            }
                         }
                     } else if errorMessage != nil {
                         Image(systemName: "exclamationmark")
@@ -156,6 +159,18 @@ struct WearableMemorySearchResultView: View {
 
     private var shouldAutoDismiss: Bool {
         result != nil && !isSearching && errorMessage == nil
+    }
+
+    private var searchProgressText: String? {
+        if let query = query?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty {
+            return "Searching \"\(query)\""
+        }
+
+        if let statusText = statusText?.trimmingCharacters(in: .whitespacesAndNewlines), !statusText.isEmpty {
+            return statusText
+        }
+
+        return nil
     }
 
     private var accessibilitySummary: String {
@@ -184,14 +199,14 @@ private struct SearchPulseGlyph: View {
         ZStack {
             Circle()
                 .stroke(.white.opacity(isPulsing ? 0.08 : 0.30), lineWidth: 8)
-                .frame(width: isPulsing ? 58 : 42, height: isPulsing ? 58 : 42)
+                .frame(width: isPulsing ? 96 : 72, height: isPulsing ? 96 : 72)
 
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 20, weight: .bold))
+                .font(.system(size: 32, weight: .bold))
                 .foregroundStyle(.white)
         }
-        .frame(width: 64, height: 64)
-        .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: isPulsing)
+        .frame(width: 96, height: 96)
+        .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: isPulsing)
         .onAppear {
             isPulsing = true
         }

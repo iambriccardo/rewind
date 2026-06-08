@@ -28,7 +28,6 @@ enum PhoneCaptureBufferPolicy {
 @Observable
 final class PhoneCaptureController: NSObject {
     let cachedFrames: AsyncStream<CachedCaptureFrame>
-    let audioChunks: AsyncStream<CaptureAudioChunk>
 
     static let captureFrameRate = 7
     static let streamFrameRate = 1
@@ -72,7 +71,6 @@ final class PhoneCaptureController: NSObject {
     @ObservationIgnored private let frameCache: CaptureFrameCache
     @ObservationIgnored private let sampleProcessor: CaptureSampleProcessor
     @ObservationIgnored private let cachedFrameContinuation: AsyncStream<CachedCaptureFrame>.Continuation
-    @ObservationIgnored private let audioChunkContinuation: AsyncStream<CaptureAudioChunk>.Continuation
     @ObservationIgnored private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "app.vogelhaus.Rewind",
         category: "PhoneCapture"
@@ -99,16 +97,10 @@ final class PhoneCaptureController: NSObject {
             cachedFrameContinuation = continuation
         }
         self.cachedFrameContinuation = cachedFrameContinuation
-        var audioChunkContinuation: AsyncStream<CaptureAudioChunk>.Continuation!
-        self.audioChunks = AsyncStream(bufferingPolicy: .bufferingNewest(12)) { continuation in
-            audioChunkContinuation = continuation
-        }
-        self.audioChunkContinuation = audioChunkContinuation
         self.sampleProcessor = CaptureSampleProcessor(
             endpoint: endpoint,
             frameCache: frameCache,
-            cachedFrameContinuation: cachedFrameContinuation,
-            audioChunkContinuation: audioChunkContinuation
+            cachedFrameContinuation: cachedFrameContinuation
         )
         super.init()
         startMetricsListener()
@@ -442,7 +434,6 @@ private final class CaptureSampleProcessor {
     private let endpoint: CaptureStreamEndpoint
     private let frameCache: CaptureFrameCache
     private let cachedFrameContinuation: AsyncStream<CachedCaptureFrame>.Continuation
-    private let audioChunkContinuation: AsyncStream<CaptureAudioChunk>.Continuation
     private let metricsContinuation: AsyncStream<CaptureMetricsUpdate>.Continuation
     private let audioEncoder = CaptureAudioPCMEncoder(
         outputSampleRate: PhoneCaptureController.audioSampleRate,
@@ -466,13 +457,11 @@ private final class CaptureSampleProcessor {
     init(
         endpoint: CaptureStreamEndpoint,
         frameCache: CaptureFrameCache,
-        cachedFrameContinuation: AsyncStream<CachedCaptureFrame>.Continuation,
-        audioChunkContinuation: AsyncStream<CaptureAudioChunk>.Continuation
+        cachedFrameContinuation: AsyncStream<CachedCaptureFrame>.Continuation
     ) {
         self.endpoint = endpoint
         self.frameCache = frameCache
         self.cachedFrameContinuation = cachedFrameContinuation
-        self.audioChunkContinuation = audioChunkContinuation
         var metricsContinuation: AsyncStream<CaptureMetricsUpdate>.Continuation!
         self.metrics = AsyncStream { continuation in
             metricsContinuation = continuation
@@ -596,11 +585,6 @@ private final class CaptureSampleProcessor {
                 mimeType: "audio/pcm;rate=\(PhoneCaptureController.audioSampleRate)",
                 data: chunkData
             )
-
-            // This local copy lets wearable-mode speech intent detection observe
-            // the same captured audio without adding a second microphone session
-            // or changing the backend stream lifecycle.
-            audioChunkContinuation.yield(chunk)
 
             Task {
                 await endpoint.receiveAudioChunk(chunk)

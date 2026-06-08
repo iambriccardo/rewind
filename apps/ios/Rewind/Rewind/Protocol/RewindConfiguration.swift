@@ -9,10 +9,14 @@ import Foundation
 
 /// Runtime configuration for the local Rewind protocol client.
 ///
-/// The MVP backend defaults to localhost for Simulator development. Physical device
-/// builds fall back to the current Mac LAN backend URL because localhost points at
-/// the iPhone itself, not the development machine.
+/// The backend URL intentionally defaults to a non-routable documentation address.
+/// Local development devices must opt in to the actual Mac LAN address from Settings,
+/// which keeps accidental localhost assumptions out of physical-device builds.
 nonisolated struct RewindConfiguration: Sendable {
+    nonisolated static let backendURLDefaultsKey = "REWIND_BACKEND_URL"
+    nonisolated static let defaultBackendURLString = "http://192.0.2.1:8787"
+    nonisolated static let defaultBackendPort = 8787
+
     var backendBaseURL: URL
     var userID: String
     var deviceID: String
@@ -21,9 +25,9 @@ nonisolated struct RewindConfiguration: Sendable {
     nonisolated static var defaultConfiguration: RewindConfiguration {
         let infoDictionary = Bundle.main.infoDictionary ?? [:]
         let backendURLString = Self.value(
-            for: "REWIND_BACKEND_URL",
+            for: backendURLDefaultsKey,
             in: infoDictionary,
-            defaultValue: Self.defaultBackendURLString
+            defaultValue: defaultBackendURLString
         )
         let userID = Self.value(
             for: "REWIND_DEV_USER_ID",
@@ -129,22 +133,47 @@ nonisolated struct RewindConfiguration: Sendable {
         return nil
     }
 
-    private nonisolated static var defaultBackendURLString: String {
-#if os(iOS) && !targetEnvironment(simulator)
-        "http://172.20.10.2:8787"
-#else
-        "http://localhost:8787"
-#endif
-    }
-
-    private nonisolated static func validBackendURL(from value: String) -> URL {
-        let configuredURL = URL(string: value) ?? localDevelopment.backendBaseURL
+    nonisolated static func validBackendURL(from value: String) -> URL {
+        let configuredURL = normalizedBackendURL(from: value) ?? URL(string: defaultBackendURLString)!
 #if os(iOS) && !targetEnvironment(simulator)
         if isLoopback(configuredURL) {
             return URL(string: defaultBackendURLString)!
         }
 #endif
         return configuredURL
+    }
+
+    /// Normalizes a Settings-entered backend address into the URL used by HTTP and WebSocket clients.
+    ///
+    /// Users can enter either a full `http://host:port` URL or a bare IP/host. Bare
+    /// values default to `http` on the Rewind development backend port.
+    nonisolated static func normalizedBackendURL(from value: String) -> URL? {
+        let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedValue.isEmpty else {
+            return nil
+        }
+
+        let candidate = trimmedValue.contains("://") ? trimmedValue : "http://\(trimmedValue)"
+        guard var components = URLComponents(string: candidate) else {
+            return nil
+        }
+
+        guard components.scheme == "http" || components.scheme == "https", components.host != nil else {
+            return nil
+        }
+
+        if components.port == nil {
+            components.port = defaultBackendPort
+        }
+
+        components.path = ""
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
+    nonisolated static func persistBackendURL(_ url: URL, userDefaults: UserDefaults = .standard) {
+        userDefaults.set(url.absoluteString, forKey: backendURLDefaultsKey)
     }
 
     private nonisolated static func isLoopback(_ url: URL) -> Bool {

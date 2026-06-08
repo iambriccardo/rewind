@@ -46,21 +46,24 @@ private struct CaptureRememberedBanner: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "checkmark")
+            Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 16, weight: .semibold))
                 .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.green)
                 .frame(width: 20, height: 20)
 
             Text(item.title)
-                .font(.body)
+                .font(.body.weight(.semibold))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .padding(.trailing, 4)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .glassEffect(.regular.interactive(false), in: Capsule())
+        .padding(.leading, 14)
+        .padding(.trailing, 16)
+        .padding(.vertical, 11)
+        .background(.black.opacity(0.12), in: Capsule())
+        .glassEffect(.regular.tint(.green.opacity(0.14)).interactive(false), in: Capsule())
+        .shadow(color: .green.opacity(0.14), radius: 18, y: 8)
         .accessibilityElement(children: .combine)
     }
 }

@@ -286,57 +286,24 @@ struct Scrubber: View {
         }
 
         let minorInterval = timelineScale.minorInterval
+        let markInterval = max(1, minorInterval / 2)
         let majorInterval = timelineScale.majorInterval
-        var usedIntervals = Set<Int>()
         var marks: [TimelineMark] = []
+        let displayDuration = timelineLayout.recordedDuration
+        var markOffset: TimeInterval = 0
+        var markIndex = 0
 
-        for segment in timelineLayout.recordedSegments {
-            let segmentStart = segment.startDate.timeIntervalSinceReferenceDate
-            let segmentEnd = segment.endDate.timeIntervalSinceReferenceDate
-            let firstMarkInterval = ceil(segmentStart / minorInterval) * minorInterval
-
-            appendTimelineMark(
-                at: segmentStart,
-                majorInterval: majorInterval,
-                usedIntervals: &usedIntervals,
-                marks: &marks
-            )
-
-            if firstMarkInterval <= segmentEnd {
-                for interval in stride(from: firstMarkInterval, through: segmentEnd, by: minorInterval) {
-                    appendTimelineMark(
-                        at: interval,
-                        majorInterval: majorInterval,
-                        usedIntervals: &usedIntervals,
-                        marks: &marks
-                    )
-                }
-            }
-
-            appendTimelineMark(
-                at: segmentEnd,
-                majorInterval: majorInterval,
-                usedIntervals: &usedIntervals,
-                marks: &marks
-            )
+        while markOffset <= displayDuration {
+            marks.append(TimelineMark(
+                date: timelineLayout.date(forDisplayOffset: markOffset),
+                displayOffset: markOffset,
+                isMajor: markOffset.truncatingRemainder(dividingBy: majorInterval) < 0.5
+            ))
+            markIndex += 1
+            markOffset = markInterval * TimeInterval(markIndex)
         }
 
-        return marks.sorted { $0.date < $1.date }
-    }
-
-    private func appendTimelineMark(
-        at interval: TimeInterval,
-        majorInterval: TimeInterval,
-        usedIntervals: inout Set<Int>,
-        marks: inout [TimelineMark]
-    ) {
-        let roundedInterval = Int(interval.rounded())
-        guard usedIntervals.insert(roundedInterval).inserted else {
-            return
-        }
-
-        let isMajor = interval.truncatingRemainder(dividingBy: majorInterval) < 0.5
-        marks.append(TimelineMark(date: Date(timeIntervalSinceReferenceDate: interval), isMajor: isMajor))
+        return marks
     }
 
     private func yPosition(for date: Date, in metrics: ScrubberMetrics) -> CGFloat {
@@ -600,10 +567,11 @@ private struct ScrubberMetrics {
 
 private struct TimelineMark: Identifiable {
     let date: Date
+    let displayOffset: TimeInterval
     let isMajor: Bool
 
     var id: TimeInterval {
-        date.timeIntervalSinceReferenceDate
+        displayOffset
     }
 }
 
@@ -689,6 +657,13 @@ private struct TimelineLayout {
     func date(for progress: CGFloat) -> Date {
         let clampedProgress = min(max(progress, 0), 1)
         let displayOffset = totalDisplayDuration * TimeInterval(clampedProgress)
+        return date(forDisplayOffset: displayOffset)
+    }
+
+    /// Converts a stitched timeline offset back into the real timestamp at that
+    /// visual position so tick marks stay evenly spaced even when capture gaps
+    /// are removed from the scrubber track.
+    func date(forDisplayOffset displayOffset: TimeInterval) -> Date {
         let segment = segment(containingDisplayOffset: displayOffset)
 
         return segment.date(forDisplayOffset: displayOffset)

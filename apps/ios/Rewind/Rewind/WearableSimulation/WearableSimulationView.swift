@@ -12,9 +12,8 @@ import SwiftUI
 ///
 /// The view owns a dedicated `RewindLiveStore` so entering the simulation starts
 /// the live camera, microphone, rolling frame cache, and backend protocol stream
-/// immediately. It intentionally avoids visible controls; local speech intent
-/// detection drives remembered confirmation, while protocol search events drive
-/// retrieval feedback.
+/// immediately. It intentionally avoids visible controls; backend save and search
+/// protocol events drive the top-right wearable feedback components.
 struct WearableSimulationView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
@@ -22,18 +21,12 @@ struct WearableSimulationView: View {
     @State private var liveStore: RewindLiveStore
     @State private var confirmation: WearableMemoryConfirmation?
     @State private var snapshotCaptureTriggerID: UUID?
-#if os(iOS)
-    @State private var rememberSpeechDetector = WearableRememberSpeechDetector()
-#endif
 
     private let automaticallyStartsCapture: Bool
     private let previewConfirmation: WearableMemoryConfirmation?
     private let previewSearchResult: RewindSearchResultCard?
 
     @State private var confirmationDismissTask: Task<Void, Never>?
-#if os(iOS)
-    @State private var rememberSpeechIntentTask: Task<Void, Never>?
-#endif
 
     init(
         automaticallyStartsCapture: Bool = true,
@@ -63,7 +56,23 @@ struct WearableSimulationView: View {
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
-            topRightFeedback
+            if shouldShowRecordingGlow {
+                WearableRecordingEdgeGlow()
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+
+            wearableBackButton
+                .padding(.top, 32)
+                .ignoresSafeArea()
+
+            topRightResult
+                .padding(.top, 32)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
+            bottomCenterFeedback
+                .ignoresSafeArea()
                 .allowsHitTesting(false)
         }
         .background(.black)
@@ -78,9 +87,6 @@ struct WearableSimulationView: View {
         }
         .onDisappear {
             confirmationDismissTask?.cancel()
-#if os(iOS)
-            stopRememberSpeechFeedback()
-#endif
             Task {
                 await liveStore.stop()
             }
@@ -95,20 +101,31 @@ struct WearableSimulationView: View {
                 case .active:
                     await startWearableExperience()
                 case .inactive, .background:
-#if os(iOS)
-                    stopRememberSpeechFeedback()
-#endif
                     await liveStore.stop()
                 @unknown default:
                     break
                 }
             }
         }
+        .onChange(of: liveStore.status) { _, status in
+            handleLiveStatusChange(status)
+        }
         .accessibilityAction(.escape) {
             dismiss()
         }
         .onLongPressGesture(minimumDuration: 1.2) {
             dismiss()
+        }
+    }
+
+    private var wearableBackButton: some View {
+        GeometryReader { proxy in
+            WearableSimulationBackButton {
+                dismiss()
+            }
+            .padding(.top, proxy.safeAreaInsets.top + 14)
+            .padding(.leading, 14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
@@ -133,25 +150,14 @@ struct WearableSimulationView: View {
 #endif
     }
 
-    private var topRightFeedback: some View {
+    private var topRightResult: some View {
         GeometryReader { proxy in
             VStack(alignment: .trailing, spacing: 10) {
-                if let confirmation = confirmation ?? previewConfirmation {
-                    WearableMemoryConfirmationView(confirmation: confirmation)
-                        .transition(
-                            .move(edge: .top)
-                                .combined(with: .scale(scale: 0.9, anchor: .topTrailing))
-                                .combined(with: .opacity)
-                        )
-                }
-
-                if shouldShowSearchFeedback {
-                    WearableMemorySearchResultView(
+                if shouldShowSearchResultCarousel {
+                    WearableSearchResultCarouselView(
                         query: searchQuery,
-                        isSearching: searchIsBusy,
                         statusText: searchStatusText,
-                        result: searchResult,
-                        errorMessage: searchError
+                        results: searchResults
                     )
                     .transition(
                         .move(edge: .trailing)
@@ -164,16 +170,57 @@ struct WearableSimulationView: View {
             .padding(.trailing, 14)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }
-        .animation(.smooth(duration: 0.24), value: confirmation?.id)
-        .animation(.smooth(duration: 0.24), value: liveStore.isSearchBusy)
-        .animation(.smooth(duration: 0.24), value: liveStore.searchResults.first?.id)
+        .animation(.smooth(duration: 0.24), value: searchResults.map(\.id).joined(separator: "-"))
     }
 
-    private var shouldShowSearchFeedback: Bool {
-        previewSearchResult != nil
-            || liveStore.isSearchBusy
-            || liveStore.searchQuery != nil
-            || liveStore.searchError != nil
+    private var bottomCenterFeedback: some View {
+        GeometryReader { proxy in
+            VStack(spacing: 8) {
+                Spacer()
+
+                if let confirmation = confirmation ?? previewConfirmation {
+                    WearableMemoryConfirmationView(confirmation: confirmation)
+                        .transition(.wearableBottomText)
+                } else if searchIsBusy {
+                    WearableStatusTextChip(text: searchProgressText)
+                        .transition(.wearableBottomText)
+                } else if let searchError {
+                    WearableStatusTextChip(text: searchError)
+                        .transition(.wearableBottomText)
+                }
+            }
+            .padding(.horizontal, 22)
+            .padding(.bottom, proxy.safeAreaInsets.bottom + 34)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        }
+        .animation(.smooth(duration: 0.34), value: confirmation?.id)
+        .animation(.smooth(duration: 0.34), value: liveStore.isSearchBusy)
+        .animation(.smooth(duration: 0.34), value: liveStore.searchError)
+    }
+
+    private var shouldShowSearchResultCarousel: Bool {
+        !searchResults.isEmpty && !searchIsBusy && searchError == nil
+    }
+
+    private var shouldShowRecordingGlow: Bool {
+        switch liveStore.status {
+        case .failed, .paused:
+            previewSearchResult != nil || previewConfirmation != nil
+        case .starting, .connecting, .live, .saving, .saved, .searching, .searchComplete, .operationFailed:
+            true
+        }
+    }
+
+    private var searchProgressText: String {
+        if let statusText = searchStatusText?.trimmingCharacters(in: .whitespacesAndNewlines), !statusText.isEmpty {
+            return statusText
+        }
+
+        if let query = searchQuery?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty {
+            return "Searching \(query)"
+        }
+
+        return "Searching your rewinds"
     }
 
     private var searchQuery: String? {
@@ -188,8 +235,12 @@ struct WearableSimulationView: View {
         previewSearchResult == nil ? liveStore.searchStatusText : nil
     }
 
-    private var searchResult: RewindSearchResultCard? {
-        previewSearchResult ?? liveStore.searchResults.first
+    private var searchResults: [RewindSearchResultCard] {
+        if let previewSearchResult {
+            return [previewSearchResult]
+        }
+
+        return liveStore.searchResults
     }
 
     private var searchError: String? {
@@ -198,37 +249,20 @@ struct WearableSimulationView: View {
 
     private func startWearableExperience() async {
         await liveStore.start()
-#if os(iOS)
-        await startRememberSpeechFeedback()
-#endif
     }
 
-#if os(iOS)
-    private func startRememberSpeechFeedback() async {
-        await rememberSpeechDetector.start(audioChunks: liveStore.captureController.audioChunks)
-        guard rememberSpeechIntentTask == nil else {
-            return
-        }
-
-        rememberSpeechIntentTask = Task {
-            for await _ in rememberSpeechDetector.intents {
-                await MainActor.run {
-                    showConfirmation()
-                }
-            }
+    private func handleLiveStatusChange(_ status: LiveStatus) {
+        // `saving` is emitted from the backend save-request event. Wearable
+        // confirmation should be server-backed, but not blocked on the later
+        // local frame upload commit path.
+        if case let .saving(message) = status {
+            showConfirmation(text: message)
         }
     }
 
-    private func stopRememberSpeechFeedback() {
-        rememberSpeechIntentTask?.cancel()
-        rememberSpeechIntentTask = nil
-        rememberSpeechDetector.stop()
-    }
-#endif
-
-    private func showConfirmation() {
+    private func showConfirmation(text: String) {
         confirmationDismissTask?.cancel()
-        confirmation = WearableMemoryConfirmation()
+        confirmation = WearableMemoryConfirmation(text: text)
         snapshotCaptureTriggerID = UUID()
 
         confirmationDismissTask = Task {
@@ -241,6 +275,107 @@ struct WearableSimulationView: View {
             }
         }
     }
+}
+
+private struct WearableSearchResultCarouselView: View {
+    let query: String?
+    let statusText: String?
+    let results: [RewindSearchResultCard]
+
+    @State private var activeResultIndex = 0
+    @State private var cardOffset = CGSize.zero
+    @State private var cardScale = 1.0
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            if let activeResult {
+                WearableMemorySearchResultView(
+                    query: query,
+                    isSearching: false,
+                    statusText: statusText,
+                    result: activeResult,
+                    errorMessage: nil,
+                    autoDismissesResult: false
+                )
+                .scaleEffect(cardScale, anchor: .topTrailing)
+                .offset(cardOffset)
+            }
+        }
+        .frame(width: 228, height: 348, alignment: .topTrailing)
+        .padding(.leading, Self.motionPadding)
+        .padding(.bottom, 18)
+        .task(id: resultIdentity) {
+            await advanceVisibleResult()
+        }
+        .onChange(of: resultIdentity) { _, _ in
+            activeResultIndex = 0
+            cardOffset = .zero
+            cardScale = 1
+        }
+    }
+
+    private var activeResult: RewindSearchResultCard? {
+        guard !results.isEmpty else {
+            return nil
+        }
+
+        return results[min(activeResultIndex, results.count - 1)]
+    }
+
+    private var resultIdentity: String {
+        results.map(\.id).joined(separator: "-")
+    }
+
+    @MainActor
+    private func advanceVisibleResult() async {
+        activeResultIndex = 0
+        cardOffset = .zero
+        cardScale = 1
+
+        guard results.count > 1 else {
+            return
+        }
+
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(for: .milliseconds(Self.resultAdvanceDelayMilliseconds))
+            } catch {
+                return
+            }
+
+            guard !Task.isCancelled else {
+                return
+            }
+
+            withAnimation(.smooth(duration: 0.34)) {
+                cardOffset = CGSize(width: -Self.motionPadding, height: 12)
+                cardScale = 0.94
+            }
+
+            do {
+                try await Task.sleep(for: .milliseconds(Self.resultSwapAnimationMilliseconds))
+            } catch {
+                return
+            }
+
+            guard !Task.isCancelled else {
+                return
+            }
+
+            activeResultIndex = (activeResultIndex + 1) % results.count
+            cardOffset = CGSize(width: 34, height: -8)
+            cardScale = 0.96
+
+            withAnimation(.spring(response: 0.58, dampingFraction: 0.82, blendDuration: 0.08)) {
+                cardOffset = .zero
+                cardScale = 1
+            }
+        }
+    }
+
+    private static let resultAdvanceDelayMilliseconds = 2_900
+    private static let resultSwapAnimationMilliseconds = 340
+    private static let motionPadding: CGFloat = 28
 }
 
 private struct WearableSimulationVignette: View {
@@ -258,6 +393,38 @@ private struct WearableSimulationVignette: View {
     }
 }
 
+/// Subtle recording affordance shown while the wearable capture surface is active.
+private struct WearableRecordingEdgeGlow: View {
+    @State private var pulse = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            let shortestSide = min(proxy.size.width, proxy.size.height)
+            let glowWidth = max(7, shortestSide * 0.024)
+
+            ZStack {
+                ContainerRelativeShape()
+                    .stroke(.red, lineWidth: glowWidth * 1.8)
+                    .blur(radius: pulse ? 30 : 18)
+                    .opacity(pulse ? 0.74 : 0.52)
+
+                ContainerRelativeShape()
+                    .stroke(.red, lineWidth: glowWidth * 0.82)
+                    .blur(radius: pulse ? 12 : 7)
+                    .opacity(pulse ? 0.68 : 0.42)
+            }
+            .padding(glowWidth / 2)
+            .compositingGroup()
+            .onAppear {
+                pulse = false
+                withAnimation(.easeInOut(duration: 1.25).repeatForever(autoreverses: true)) {
+                    pulse = true
+                }
+            }
+        }
+    }
+}
+
 private struct WearableSimulationFallbackSurface: View {
     let systemImage: String
 
@@ -271,6 +438,24 @@ private struct WearableSimulationFallbackSurface: View {
                 .foregroundStyle(.white.opacity(0.42))
                 .accessibilityHidden(true)
         }
+    }
+}
+
+/// Liquid Glass dismissal control for the full-screen wearable capture surface.
+private struct WearableSimulationBackButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.left")
+                .font(.title3.weight(.bold))
+                .foregroundStyle(.white)
+                .frame(width: 52, height: 52)
+                .contentShape(Circle())
+                .glassEffect(.regular.interactive(true), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Back")
     }
 }
 
@@ -311,6 +496,17 @@ private struct WearableSimulationFallbackSurface: View {
     WearableSimulationFallbackSurface(systemImage: "camera.viewfinder")
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
+}
+
+#Preview("Wearable Simulation Back Button") {
+    ZStack(alignment: .topLeading) {
+        MemoryImageSurface(imageSource: .asset(name: "memory-example-3081"))
+            .ignoresSafeArea()
+
+        WearableSimulationBackButton {}
+            .padding()
+    }
+    .preferredColorScheme(.dark)
 }
 
 private enum WearableSimulationPreviewData {

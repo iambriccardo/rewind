@@ -33,6 +33,7 @@ const TimeRangeSchema = z
 const CreateRewindSchema = z.object({
   title: z.string().min(1).max(160),
   description: z.string().min(1).max(4000),
+  status_text: z.string().min(1).max(160).optional(),
   entities: z.array(z.unknown()).default([]),
   location_hint: z.string().optional(),
   rewind_duration_seconds: z.number().positive().max(300).optional()
@@ -108,6 +109,7 @@ const GENERIC_SEARCH_TERMS = new Set([
 
 const SearchRewindsSchema = z.object({
   query: z.string().min(1).max(1000),
+  status_text: z.string().min(1).max(160).optional(),
   limit: z.number().int().positive().max(20).default(10),
   time_range: TimeRangeSchema,
   entities: z.array(z.unknown()).optional(),
@@ -193,6 +195,7 @@ export class ToolRouter {
       ...rawArgs,
       title: normalizeFreeText(rawArgs.title, 160),
       description: normalizeFreeText(rawArgs.description, 4000),
+      status_text: normalizeOptionalText(rawArgs.status_text, 160),
       entities: normalizeEntities(rawArgs.entities),
       location_hint: normalizeOptionalText(rawArgs.location_hint, 160)
     };
@@ -242,6 +245,7 @@ export class ToolRouter {
       upload_url: `/v1/rewinds/${event.id}/commit`,
       title: event.title,
       description: event.description,
+      status_text: args.status_text ?? saveStatusText(event.title, rewindDurationSeconds),
       rewind_duration_seconds: rewindDurationSeconds,
       capture_anchor_utc: captureAnchorUtc,
       capture_duration_ms: captureDurationMs,
@@ -349,6 +353,23 @@ function quantizedCaptureDurationMs(requestedMs: number, input: { bufferDuration
   }
   const clampedMs = Math.min(bufferDurationMs, requestedMs);
   return Math.max(frameIntervalMs, Math.min(bufferDurationMs, Math.ceil(clampedMs / frameIntervalMs) * frameIntervalMs));
+}
+
+function saveStatusText(title: string, rewindDurationSeconds: number): string {
+  return `Remembering ${title} from the last ${formatDuration(rewindDurationSeconds)}.`;
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 1) return `${Math.round(seconds * 1000)} ms`;
+  if (seconds === 1) return '1 second';
+  if (seconds < 60) return `${formatNumber(seconds)} seconds`;
+  const minutes = seconds / 60;
+  if (minutes === 1) return '1 minute';
+  return `${formatNumber(minutes)} minutes`;
+}
+
+function formatNumber(value: number): string {
+  return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1).replace(/\.0$/, '');
 }
 
 function compactEvent(event: { id: string; status: string; title: string; description: string; entities: string[]; location_hint?: string | null }, rewindDurationSeconds?: number) {

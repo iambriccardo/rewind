@@ -43,6 +43,16 @@ final class CaptureTimelineStore {
         loadedDay = calendar.startOfDay(for: date)
     }
 
+    /// Loads the day containing the newest cached frame.
+    ///
+    /// Today should open on remembered local context, not on the wall-clock
+    /// instant if no frame has been captured there yet.
+    func loadLatestAvailableDay(fallbackDate: Date = .now) async -> CachedCaptureFrame? {
+        let latestFrame = await cache.latestFrame()
+        await loadDay(containing: latestFrame?.timestamp ?? fallbackDate)
+        return latestFrame
+    }
+
     func nearestFrame(to date: Date) -> CachedCaptureFrame? {
         guard !frames.isEmpty else {
             return nil

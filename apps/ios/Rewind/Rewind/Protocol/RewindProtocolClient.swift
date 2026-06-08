@@ -94,6 +94,7 @@ actor RewindProtocolClient {
         try? await send(RewindMediaEndMessage(modality: "audio"))
         closeWebSocket()
         ready = false
+        mediaSequence = 0
         continuation.yield(.status("Realtime disconnected"))
     }
 
@@ -235,7 +236,14 @@ actor RewindProtocolClient {
                     continue
                 }
 
-                try await handleServerMessage(RewindProtocolDecoder.decode(data, using: decoder))
+                do {
+                    try await handleServerMessage(RewindProtocolDecoder.decode(data, using: decoder))
+                } catch {
+                    logger.error(
+                        "Ignored malformed Rewind protocol message: \(error.localizedDescription, privacy: .public). Payload: \(Self.payloadPreview(data), privacy: .public)"
+                    )
+                    continue
+                }
             } catch {
                 if !Task.isCancelled {
                     if self.webSocketTask === webSocketTask {
@@ -255,6 +263,7 @@ actor RewindProtocolClient {
         receiveTask = nil
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
+        ready = false
     }
 
     private func handleServerMessage(_ message: RewindServerMessage) async throws {
@@ -314,6 +323,11 @@ actor RewindProtocolClient {
         }
 
         return max(0, Int(milliseconds.rounded()))
+    }
+
+    private nonisolated static func payloadPreview(_ data: Data) -> String {
+        let text = String(data: data.prefix(700), encoding: .utf8) ?? "<\(data.count) bytes>"
+        return data.count > 700 ? "\(text)..." : text
     }
 }
 

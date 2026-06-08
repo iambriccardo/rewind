@@ -69,7 +69,7 @@ struct SearchBar: View {
     }
 }
 
-/// Bottom launch cluster that keeps the search, settings, and capture glass in one shared context.
+/// Bottom launch cluster that keeps search, settings, and wearable capture in one shared context.
 struct RewindControlBar: View {
     private let namespace: Namespace.ID
     private let searchTransitionID: String
@@ -104,7 +104,7 @@ struct RewindControlBar: View {
 
                 SearchLaunchButton(action: onSearch, namespace: namespace, transitionID: searchTransitionID)
 
-                CaptureButton(action: onCapture, namespace: namespace, transitionID: captureTransitionID)
+                WearableSimulationLaunchButton(action: onCapture, namespace: namespace, transitionID: captureTransitionID)
             }
         }
     }
@@ -167,26 +167,26 @@ struct SettingsButton: View {
     }
 }
 
-/// Standalone capture entry point used beside search controls.
-struct CaptureButton: View {
+/// Standalone wearable simulation entry point used beside search controls.
+struct WearableSimulationLaunchButton: View {
     let action: () -> Void
     let namespace: Namespace.ID
     let transitionID: String
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "plus")
-                .font(.title3.weight(.bold))
-                .foregroundStyle(.primary)
+            Image(systemName: "circle.fill")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white)
                 .frame(width: 52, height: 52)
                 .contentShape(Circle())
                 .matchedTransitionSource(id: transitionID, in: namespace) { source in
                     source.clipShape(.rect(cornerRadius: 26, style: .continuous))
                 }
-                .glassEffect(.regular.interactive(true), in: Circle())
+                .glassEffect(.clear.tint(.red.opacity(0.3)).interactive(true), in: Circle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Start capture")
+        .accessibilityLabel("Start recording")
     }
 }
 

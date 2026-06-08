@@ -9,14 +9,14 @@ import SwiftUI
 
 /// The live Rewind surface.
 ///
-/// This screen keeps the timeline clean by default. Recording only runs while
-/// the dedicated live mode is open, and search opens from explicit UI input.
+/// This screen keeps the timeline clean by default. Wearable simulation is the
+/// primary capture surface, and search opens from explicit UI input.
 struct Today: View {
     @State private var timelineStore = CaptureTimelineStore()
     @State private var liveStore = RewindLiveStore()
     @State private var searchText = ""
     @State private var isSearchPresented = false
-    @State private var isLiveModePresented = false
+    @State private var isWearableSimulationPresented = false
     @State private var isSettingsPresented = false
     @State private var shouldFocusSearchOnPresentation = false
     @State private var selectedTimelineDate: Date
@@ -76,7 +76,7 @@ struct Today: View {
             } onSettings: {
                 presentSettings()
             } onCapture: {
-                presentLiveMode()
+                presentWearableSimulation()
             }
             .padding(.horizontal, 32)
         }
@@ -97,29 +97,29 @@ struct Today: View {
             .navigationTransition(.zoom(sourceID: Self.searchTransitionID, in: presentationNamespace))
             .presentationBackground(.black)
         }
-        .fullScreenCover(isPresented: $isLiveModePresented) {
-            LiveCapture()
+        .fullScreenCover(isPresented: $isWearableSimulationPresented) {
+            WearableSimulationView()
                 .navigationTransition(.zoom(sourceID: Self.captureTransitionID, in: presentationNamespace))
         }
         .fullScreenCover(isPresented: $isSettingsPresented, onDismiss: {
             Task {
-                await reloadTimelineAtNow()
+                await reloadLatestTimeline()
             }
         }) {
             RewindSettingsView()
                 .navigationTransition(.zoom(sourceID: Self.settingsTransitionID, in: presentationNamespace))
         }
-        .onChange(of: isLiveModePresented) { _, isPresented in
+        .onChange(of: isWearableSimulationPresented) { _, isPresented in
             guard !isPresented else {
                 return
             }
 
             Task {
-                await reloadTimelineAtNow()
+                await reloadLatestTimeline()
             }
         }
         .task {
-            await loadTimeline()
+            await loadLatestTimeline()
         }
         .onChange(of: liveStore.latestCachedFrame) { _, frame in
             guard let frame else {
@@ -166,13 +166,12 @@ struct Today: View {
         shouldFocusSearchOnPresentation = false
     }
 
-    private func presentLiveMode() {
+    private func presentWearableSimulation() {
         dismissSearch()
         isTimelineBrowsing = false
         granularScrubStartDate = nil
-        selectedTimelineDate = .now
 
-        isLiveModePresented = true
+        isWearableSimulationPresented = true
     }
 
     private func presentSettings() {
@@ -195,17 +194,25 @@ struct Today: View {
     private func loadTimeline(containing date: Date = .now) async {
         await timelineStore.loadDay(containing: date)
         if !isTimelineBrowsing {
-            selectedTimelineDate = Self.isNow(date) ? .now : timelineStore.initialSelection(preferredDate: date)
+            selectedTimelineDate = timelineStore.initialSelection(preferredDate: date)
         }
         latestLocalFrame = timelineStore.frames.last
     }
 
-    private func reloadTimelineAtNow() async {
+    private func loadLatestTimeline() async {
+        let latestFrame = await timelineStore.loadLatestAvailableDay()
+        let selectedFrame = latestFrame ?? timelineStore.frames.last
+        if !isTimelineBrowsing {
+            selectedTimelineDate = selectedFrame?.timestamp ?? .now
+        }
+        latestLocalFrame = selectedFrame
+    }
+
+    private func reloadLatestTimeline() async {
         isTimelineBrowsing = false
         isTimelineScrubbing = false
         granularScrubStartDate = nil
-        await loadTimeline(containing: .now)
-        selectedTimelineDate = .now
+        await loadLatestTimeline()
     }
 
     private var timelineFrame: CachedCaptureFrame? {
@@ -394,6 +401,8 @@ private struct SearchExperience: View {
     @Binding var searchText: String
     @State private var requestSearchFocus = false
     @State private var isSearchFieldFocused = false
+    @State private var focusedResult: RewindSearchResultCard?
+    @Namespace private var searchResultFocusNamespace
     let isSearching: Bool
     let errorMessage: String?
     let results: [RewindSearchResultCard]
@@ -424,8 +433,11 @@ private struct SearchExperience: View {
             SearchResultsSurface(
                 isSearching: isSearching,
                 errorMessage: errorMessage,
-                results: results
-            )
+                results: results,
+                namespace: searchResultFocusNamespace
+            ) { result in
+                presentFocusedResult(result)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(action: onBack) {
@@ -447,11 +459,43 @@ private struct SearchExperience: View {
         .background(.black)
         .preferredColorScheme(.dark)
         .toolbarBackground(.hidden, for: .navigationBar)
+        .overlay {
+            if let focusedResult {
+                SearchResultFocusOverlay(
+                    result: focusedResult,
+                    namespace: searchResultFocusNamespace,
+                    matchedGeometryID: matchedGeometryID(for: focusedResult)
+                ) {
+                    self.focusedResult = nil
+                }
+                .ignoresSafeArea()
+                .transition(.asymmetric(
+                    insertion: .scale(scale: 0.82).combined(with: .opacity),
+                    removal: .scale(scale: 0.92).combined(with: .opacity)
+                ))
+                .zIndex(20)
+            }
+        }
         .task(id: focusOnAppear) {
             if focusOnAppear {
                 requestSearchFocus = true
             }
         }
+        .animation(.spring(response: 0.36, dampingFraction: 0.72), value: focusedResult?.id)
+    }
+
+    private func presentFocusedResult(_ result: RewindSearchResultCard) {
+        guard !result.frameURLs.isEmpty else {
+            return
+        }
+
+        requestSearchFocus = false
+        isSearchFieldFocused = false
+        focusedResult = result
+    }
+
+    private func matchedGeometryID(for result: RewindSearchResultCard) -> String {
+        "search-result-\(result.id)"
     }
 }
 
@@ -471,6 +515,8 @@ private struct SearchResultsSurface: View {
     let isSearching: Bool
     let errorMessage: String?
     let results: [RewindSearchResultCard]
+    let namespace: Namespace.ID
+    let onFocusResult: (RewindSearchResultCard) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -499,7 +545,13 @@ private struct SearchResultsSurface: View {
                 ScrollView {
                     LazyVGrid(columns: gridColumns, spacing: 12) {
                         ForEach(results) { result in
-                            SearchResultTile(result: result)
+                            SearchResultTile(
+                                result: result,
+                                namespace: namespace,
+                                matchedGeometryID: "search-result-\(result.id)"
+                            ) {
+                                onFocusResult(result)
+                            }
                         }
                     }
                     .padding(.horizontal)
@@ -521,29 +573,39 @@ private struct SearchResultsSurface: View {
 
 private struct SearchResultTile: View {
     let result: RewindSearchResultCard
+    let namespace: Namespace.ID
+    let matchedGeometryID: String
+    let onFocus: () -> Void
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            resultImage
+        Button(action: onFocus) {
+            ZStack(alignment: .bottomLeading) {
+                resultImage
 
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.12), .black.opacity(0.78)],
-                startPoint: .center,
-                endPoint: .bottom
-            )
+                LinearGradient(
+                    colors: [.clear, .black.opacity(0.12), .black.opacity(0.78)],
+                    startPoint: .center,
+                    endPoint: .bottom
+                )
 
-            Text(result.title)
-                .font(.system(.title3, design: .rounded).weight(.semibold))
-                .foregroundStyle(.white)
-                .lineLimit(2)
-                .padding(.horizontal, 22)
-                .padding(.bottom, 20)
+                Text(result.title)
+                    .font(.system(.title3, design: .rounded).weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, 20)
+            }
         }
+        .buttonStyle(.plain)
+        .disabled(result.frameURLs.isEmpty)
         .aspectRatio(0.78, contentMode: .fit)
+        .matchedGeometryEffect(id: matchedGeometryID, in: namespace)
         .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(result.title)
+        .accessibilityHint(result.frameURLs.isEmpty ? "" : "Open preview.")
     }
 
     @ViewBuilder

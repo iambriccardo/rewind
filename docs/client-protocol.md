@@ -299,6 +299,7 @@ When Gemini Live decides the user asked to remember the current or just-finished
   "upload_url": "/v1/rewinds/rewind-event-uuid/commit",
   "title": "Pen location",
   "description": "User asked to remember where the pen was left.",
+  "status_text": "Remembering where you put the pen from the last few seconds.",
   "rewind_duration_seconds": 8,
   "capture_anchor_utc": "2026-06-06T15:30:00.000Z",
   "capture_duration_ms": 8000,
@@ -312,9 +313,10 @@ When Gemini Live decides the user asked to remember the current or just-finished
 Client behavior:
 
 1. Keep the live socket running.
-2. Select local frames whose `captured_at` falls inside `[capture_window_started_at, capture_window_ended_at]`.
-3. Upload the selected frame references to `upload_url`.
-4. Include raw frame bytes only when `include_frame_images` is `true`.
+2. Render `status_text` as transient save progress while the frame window uploads.
+3. Select local frames whose `captured_at` falls inside `[capture_window_started_at, capture_window_ended_at]`.
+4. Upload the selected frame references to `upload_url`.
+5. Include raw frame bytes only when `include_frame_images` is `true`.
 
 `capture_anchor_utc` is the client-frame UTC timestamp where the requested rewind ends. The backend stamps the backend receive time when it receives the Gemini Live tool call, before embedding generation or pending-event persistence, then applies the estimated client clock offset from the handshake so the window aligns with the client's `captured_at` frame timestamps. Slower backend work does not shift the selected media window. `capture_duration_ms` is the authoritative duration for client frame selection; `rewind_duration_seconds` is kept for display and simple clients.
 

@@ -68,6 +68,11 @@ export class GeminiLiveAgent {
               description:
                 'A compact memory summary inferred from the user request plus recent audio/video context. Resolve vague references like this, that, here, or where I put this by using visible objects, actions, and spatial context. If the user gives an explicit duration, use it for rewind_duration_seconds but still summarize the actual saved content.'
             },
+            status_text: {
+              type: 'string',
+              description:
+                'A short warm present-progress sentence for the client to show while the phone commits the rewind, for example "Remembering where you put the blue pen from the last few seconds." Mention the concrete object/action and the selected time window naturally. Keep it under 120 characters.'
+            },
             entities: {
               type: 'array',
               minItems: 1,
@@ -89,7 +94,7 @@ export class GeminiLiveAgent {
                 'How many seconds of the phone rolling buffer should be preserved, ending at the backend save-request anchor. Must be greater than zero and no longer than the available buffer. Choose a value that can contain at least one captured frame at the reported frame interval.'
             }
           },
-          required: ['title', 'description', 'entities', 'rewind_duration_seconds']
+          required: ['title', 'description', 'status_text', 'entities', 'rewind_duration_seconds']
         }
       },
       {
@@ -279,7 +284,8 @@ export class GeminiLiveAgent {
     for (const part of message.serverContent?.modelTurn?.parts ?? []) {
       if (part.text) callbacks.onText(part.text);
       if (part.inlineData?.data) {
-        callbacks.onAudio(part.inlineData.data, part.inlineData.mimeType ?? 'audio/pcm;rate=24000');
+        const audioData = normalizeLiveInlineData(part.inlineData.data);
+        if (audioData) callbacks.onAudio(audioData, part.inlineData.mimeType ?? 'audio/pcm;rate=24000');
       }
     }
     if (message.sessionResumptionUpdate) {
@@ -375,6 +381,26 @@ function usesNativeAudioModel(model: string): boolean {
   return model.includes('native-audio');
 }
 
+function normalizeLiveInlineData(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+
+  if (Buffer.isBuffer(value)) return value.toString('base64');
+
+  if (value instanceof Uint8Array) {
+    return Buffer.from(value).toString('base64');
+  }
+
+  if (Array.isArray(value) && value.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+    return Buffer.from(value).toString('base64');
+  }
+
+  if (value && typeof value === 'object' && 'data' in value) {
+    return normalizeLiveInlineData((value as { data: unknown }).data);
+  }
+
+  return undefined;
+}
+
 function usesGemini3Model(model: string): boolean {
   return /^gemini-3(?:[.-]|$)/.test(model);
 }
@@ -436,6 +462,7 @@ function systemInstruction(clientSession: NormalizedClientSession): string {
     '- entities is REQUIRED. It must be a simple array of lowercase strings. Include concrete searchable labels: objects, people, places, surfaces, containers, visible text/brands, colors, identifiers, spatial relationships, and actions. Use short noun phrases. Do not include quotes inside the strings, JSON-like structures, bullets, full sentences, or generic words like thing, stuff, object, moment, memory.',
     '- Avoid weak standalone entities such as generic people, places, activities, gestures, or rooms when a more specific label is available. Prefer distinctive phrases with observed attributes, visible text, roles, object identity, spatial relationships, or other concrete context.',
     '- description must be a compact retrieval summary: what happened, what object/action matters, where it is, and the spatial relationship that would help future search. If the user gave an explicit duration, do not let the duration replace the actual memory content.',
+    '- status_text is REQUIRED. It is the visible UI phrase while the phone preserves the buffered frames. Mention the concrete thing being remembered and the selected time window, for example "Remembering where you put the blue pen from the last few seconds." or "Saving the cutting-board setup from the last 30 seconds." Keep it under 120 characters.',
     '- title should be short, human-readable, and content-specific. Do not title memories as "Last N seconds", "Last N seconds memory", "Last N seconds activity", "Remember this", or "Remind me about this" when the visible/audible content can be named.',
     '- location_hint should be included whenever a reliable place, surface, container, or area is visible or mentioned. Use a concise natural phrase for the actual observed context. Omit it only when no reliable physical hint is available.',
     '- Keep create_rewind arguments compact. Do not include raw transcripts, protocol details, base64, frame IDs, timestamps, dates, or unnecessary metadata.',
@@ -451,9 +478,28 @@ function systemInstruction(clientSession: NormalizedClientSession): string {
     '- Add entities, time_range, or location_hint only when they narrow the search.',
     '- Search results are returned directly to the phone client by the backend. Do not ask for a second show/display action.',
     '',
+    '# User-Facing Time Phrasing',
+    '- UTC ISO timestamps are only for tool arguments and backend payloads. Never speak UTC, ISO strings, timezone offsets, or phrases like "UTC time" to the user unless the user explicitly asks for raw technical timestamps.',
+    '- When speaking or writing about a retrieved memory time, convert it mentally from the result timestamps using the client time and timezone, then phrase it naturally.',
+    '- Prefer relative phrasing for recent moments: "just now", "about a minute ago", "two minutes ago", "about an hour ago", or "a few hours ago". Use rounded, human-friendly values instead of exact seconds.',
+    '- For same-day moments that are not very recent, say the local clock time, for example "at 13:31 today" or "earlier today around 13:30".',
+    '- For yesterday, say "yesterday at 13:31" or "yesterday afternoon" when exactness is not useful.',
+    '- For older results, use a natural local date/time such as "on Tuesday at 13:31" or "on June 6 at 13:31". Keep it short and conversational.',
+    '- If the exact timestamp is not important to the answer, lead with the content and location, then add the natural time only if it helps orient the user.',
+    '',
+    '# Voice Response Discipline',
+    '- Voice output should actively support memory work: briefly say what you are searching for, what you are remembering/saving, search findings, no-result search outcomes, save confirmations, or brief clarifications needed to perform a requested memory action.',
+    '- Spoken progress is allowed and useful when it is concrete: "Searching your rewinds for the pen", "Remembering where you put the blue pen", or "Saving the cutting-board setup". Keep it short and aligned with status_text.',
+    '- After search results, speak the useful answer: the matched object/place/action, where it appears to be, and a natural time phrase when helpful. Keep it concise, usually one short sentence.',
+    '- After a save request, speak a short confirmation tied to the actual remembered content. It is fine to say what was stored; do not add unrelated commentary.',
+    '- Do not speak generic assistant filler such as "I found this", "I can help with that", "let me know if you need anything else", "if you want, I can...", "anything else?", or broad summaries of what you can do.',
+    '- Never end with open-ended follow-up offers or prompts. Finish after the useful memory result, save confirmation, or necessary clarification.',
+    '- If the user says something that is not a clear save or search request, stay silent instead of acknowledging it.',
+    '',
     '# Tool Discipline',
     '- Use only the two available tools.',
     '- Do not invent fields. Match the JSON schema exactly.',
-    '- Prefer one correct tool call over conversational filler. Keep spoken/text responses minimal.'
+    '- Prefer one correct tool call over conversational filler. Keep spoken/text responses minimal.',
+    '- When producing spoken or text output around a tool call, keep it consistent with the tool status_text and avoid saying a conflicting second status.'
   ].join('\n');
 }

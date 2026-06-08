@@ -21,6 +21,7 @@ final class RewindLiveStore {
     private(set) var status: LiveStatus = .starting
     private(set) var sessionID: String?
     private(set) var currentSaveRequest: RewindSaveRequest?
+    private(set) var saveStatusText: String?
     private(set) var lastCommittedFrameCount: Int?
     private(set) var searchResults: [RewindSearchResultCard] = []
     private(set) var searchQuery: String?
@@ -88,21 +89,33 @@ final class RewindLiveStore {
 
     func stop() async {
         wantsCaptureActive = false
-        guard captureController.state != .idle else {
-            return
+
+        if captureController.state != .idle {
+            await captureController.stop()
         }
 
-        await captureController.stop()
+        resetLiveSessionState()
+        status = .paused
+    }
+
+    private func resetLiveSessionState() {
         saveCommitTask?.cancel()
         saveCommitTask = nil
+        retryTask?.cancel()
+        retryTask = nil
         sessionID = nil
         currentSaveRequest = nil
+        saveStatusText = nil
+        lastCommittedFrameCount = nil
+        searchResults = []
+        searchQuery = nil
         isSearchBusy = false
         searchStatusText = nil
+        searchError = nil
+        latestCachedFrame = nil
 #if os(iOS)
         audioPlayer.stop()
 #endif
-        status = .paused
     }
 
     func submitSearch(_ query: String) async {
@@ -192,9 +205,10 @@ final class RewindLiveStore {
             status = .live("Listening")
         case let .saveRequest(request):
             currentSaveRequest = request
+            saveStatusText = request.statusText
             lastCommittedFrameCount = nil
             saveWaveID = UUID()
-            status = .saving(request.title)
+            status = .saving(request.statusText)
             saveCommitTask?.cancel()
 #if os(iOS)
             saveCommitTask = Task { [endpoint, locationProvider] in
@@ -212,6 +226,7 @@ final class RewindLiveStore {
         case let .rewindCommitted(request, frameCount):
             saveCommitTask = nil
             currentSaveRequest = nil
+            saveStatusText = nil
             lastCommittedFrameCount = frameCount
             status = .saved(request.title, frameCount)
         case let .agentText(text):
@@ -267,6 +282,7 @@ final class RewindLiveStore {
         if scope == .connection || !wasSearching {
             saveCommitTask = nil
             currentSaveRequest = nil
+            saveStatusText = nil
         }
         if wasSearching {
             searchError = message
@@ -300,6 +316,29 @@ final class RewindLiveStore {
         guard let targetDate = Self.resultReferenceDate(for: result) else {
             logger.info("Search result \(result.eventID, privacy: .public) did not include a timestamp for phone frame matching")
             return []
+        }
+
+        let referencedDeviceFrameUUIDs = result.frameRefs
+            .map(\.deviceFrameUUID)
+            .filter { !$0.isEmpty }
+        let referencedFrames = await frameCache.frames(
+            matchingDeviceFrameUUIDs: referencedDeviceFrameUUIDs,
+            near: targetDate
+        )
+
+        if !referencedFrames.isEmpty {
+            logger.info(
+                "Matched \(referencedFrames.count, privacy: .public) local frames by backend frame refs for search result \(result.eventID, privacy: .public)"
+            )
+            return referencedFrames.map(\.fileURL)
+        }
+
+        let savedMemoryFrames = await frameCache.memoryFrames(eventID: result.eventID, near: targetDate)
+        if !savedMemoryFrames.isEmpty {
+            logger.info(
+                "Matched \(savedMemoryFrames.count, privacy: .public) local saved-memory frames for search result \(result.eventID, privacy: .public)"
+            )
+            return savedMemoryFrames.map(\.fileURL)
         }
 
         let maximumDistance = Self.resultImageMatchWindow(for: result)
@@ -392,8 +431,8 @@ enum LiveStatus: Equatable {
             message
         case let .live(message):
             message
-        case let .saving(title):
-            "Capturing the frame window for \(title)."
+        case let .saving(message):
+            message
         case let .saved(title, frameCount):
             "\(title) saved with \(frameCount) frames."
         case let .searching(message):

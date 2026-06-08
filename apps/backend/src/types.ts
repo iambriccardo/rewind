@@ -146,6 +146,7 @@ export type RewindSaveRequest = {
   upload_url: string;
   title: string;
   description: string;
+  status_text: string;
   rewind_duration_seconds: number;
   capture_anchor_utc: string;
   capture_duration_ms: number;
